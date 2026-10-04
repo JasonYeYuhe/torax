@@ -19,6 +19,7 @@ from absl import logging
 import jax
 import jax.numpy as jnp
 from torax._src import jax_utils
+from torax._src import model_state as model_state_lib
 from torax._src import state
 from torax._src.config import build_runtime_params
 from torax._src.config import runtime_params as runtime_params_lib
@@ -31,6 +32,7 @@ from torax._src.orchestration import step_function
 from torax._src.output_tools import output
 from torax._src.output_tools import output_keys
 from torax._src.output_tools import post_processing
+from torax._src.pedestal_model.formation import power_scaling_formation_model
 from torax._src.sources import source_profile_builders
 from torax._src.torax_pydantic import file_restart as file_restart_pydantic_model
 from torax._src.transport_model import transport_coefficients_builder
@@ -100,22 +102,28 @@ def _get_initial_state(
 ) -> sim_state.SimState:
   """Returns the initial state to be used by run_simulation()."""
   models = step_fn.solver.models
+  initial_source_states = models.source_models.initial_state(runtime_params)
+  initial_transport_state = models.transport_model.initial_state(runtime_params)
   initial_core_profiles = initialization.initial_core_profiles(
       runtime_params,
       geo,
       source_models=models.source_models,
       neoclassical_model=models.neoclassical_model,
+      source_states=initial_source_states,
   )
   neoclassical_outputs = models.neoclassical_model(
       runtime_params, geo, initial_core_profiles
   )
-  initial_core_sources = source_profile_builders.get_all_source_profiles(
-      runtime_params=runtime_params,
-      geo=geo,
-      core_profiles=initial_core_profiles,
-      source_models=models.source_models,
-      conductivity=neoclassical_outputs.conductivity,
-      bootstrap_current=neoclassical_outputs.bootstrap_current,
+  initial_core_sources, initial_source_states = (
+      source_profile_builders.get_all_source_profiles(
+          runtime_params=runtime_params,
+          geo=geo,
+          core_profiles=initial_core_profiles,
+          source_models=models.source_models,
+          conductivity=neoclassical_outputs.conductivity,
+          bootstrap_current=neoclassical_outputs.bootstrap_current,
+          source_states=initial_source_states,
+      )
   )
 
   if models.edge_model is not None:
@@ -138,11 +146,19 @@ def _get_initial_state(
   else:
     edge_outputs = None
 
-  pedestal_transition_state = models.pedestal_model.initialize_transition_state(
-      runtime_params,
-      geo,
-      initial_core_profiles,
-      initial_core_sources,
+  initial_pedestal_state = models.pedestal_model.initial_state(
+      runtime_params=runtime_params,
+      geo=geo,
+      core_profiles=initial_core_profiles,
+  )
+  pedestal_transition_state, initial_pedestal_state = (
+      models.pedestal_model.initialize_transition_state(
+          runtime_params,
+          geo,
+          initial_core_profiles,
+          initial_core_sources,
+          initial_pedestal_state,
+      )
   )
 
   internal_boundary_conditions = (
@@ -157,18 +173,25 @@ def _get_initial_state(
           source_profiles=initial_core_sources,
       )
   )
-  transport_coeffs = (
+  transport_coeffs, initial_transport_state = (
       transport_coefficients_builder.calculate_all_transport_coeffs(
           transport_model=models.transport_model,
           runtime_params=runtime_params,
           geo=geo,
           core_profiles=initial_core_profiles,
           pedestal_transition_state=pedestal_transition_state,
+          transport_state=initial_transport_state,
           neoclassical_transport=neoclassical_outputs.transport,
           two_point_mask=internal_boundary_conditions.get_two_point_face_mask(
               geo
           ),
       )
+  )
+
+  initial_model_state = model_state_lib.ModelState(
+      pedestal=initial_pedestal_state,
+      transport=initial_transport_state,
+      sources=initial_source_states,
   )
 
   return sim_state.SimState(
@@ -190,6 +213,7 @@ def _get_initial_state(
       geometry=geo,
       edge_outputs=edge_outputs,
       pedestal_transition_state=pedestal_transition_state,
+      model_state=initial_model_state,
       time_step_calculator_state=step_fn.time_step_calculator.initial_state(
           runtime_params
       ),
@@ -308,6 +332,36 @@ def get_initial_state_and_post_processed_outputs_from_file(
       v_loop_lcfs=scalars_dataset.v_loop_lcfs.values,
       internal_plasma_energy=energy_state,
   )
+  pedestal_state = initial_state.model_state.pedestal
+  # TODO(b/434175938): Have model states reconstruct themselves from restart
+  # outputs instead of special-casing specific state subclasses here.
+  if isinstance(
+      pedestal_state.formation,
+      power_scaling_formation_model.PowerScalingFormationState,
+  ):
+    if pedestal_state.formation.dW_thermal_dt_smoothed is not None:
+      dw_thermal_dt_smoothed = jnp.asarray(
+          scalars_dataset.data_vars['dW_thermal_dt_smoothed'].to_numpy(),
+          dtype=jax_utils.get_dtype(),
+      )
+    else:
+      dw_thermal_dt_smoothed = None
+    if pedestal_state.formation.t is not None:
+      t_formation = jnp.asarray(t_restart, dtype=jax_utils.get_dtype())
+    else:
+      t_formation = None
+    pedestal_state = dataclasses.replace(
+        pedestal_state,
+        formation=dataclasses.replace(
+            pedestal_state.formation,
+            dW_thermal_dt_smoothed=dw_thermal_dt_smoothed,
+            t=t_formation,
+        ),
+    )
+  model_state = dataclasses.replace(
+      initial_state.model_state,
+      pedestal=pedestal_state,
+  )
   numerics_dataset = data_tree.children[output_keys.NUMERICS].dataset
   numerics_dataset = numerics_dataset.squeeze()
   sawtooth_crash = bool(numerics_dataset[output_keys.SAWTOOTH_CRASH])
@@ -321,6 +375,7 @@ def get_initial_state_and_post_processed_outputs_from_file(
       dataclasses.replace(
           initial_state,
           core_profiles=core_profiles,
+          model_state=model_state,
           solver_numeric_outputs=state.SolverNumericOutputs(
               sawtooth_crash=sawtooth_crash,
               solver_error_state=jnp.zeros((), jax_utils.get_int_dtype()),
