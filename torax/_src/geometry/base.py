@@ -24,7 +24,7 @@ from torax._src.torax_pydantic import torax_pydantic
 TrappedFractionSource = trapped_fraction.TrappedFractionSource
 
 
-class BaseGeometryConfig(torax_pydantic.BaseModelFrozen, abc.ABC):
+class BaseGeometryConfig(torax_pydantic.ConfigBase, abc.ABC):
   """Base class for all geometry configuration classes.
 
   Attributes:

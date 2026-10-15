@@ -32,7 +32,7 @@ from torax._src.neoclassical.transport import zeros as transport_zeros
 from torax._src.torax_pydantic import torax_pydantic
 
 
-class BaseNeoclassicalConfig(torax_pydantic.BaseModelFrozen, abc.ABC):
+class BaseNeoclassicalConfig(torax_pydantic.ConfigBase, abc.ABC):
   """Base config for neoclassical models.
 
   Subclasses configure either the built-in composite analytical model

@@ -30,7 +30,7 @@ from torax._src.torax_pydantic import torax_pydantic
 # pylint: disable=invalid-name
 
 
-class BaseSolver(torax_pydantic.BaseModelFrozen, abc.ABC):
+class BaseSolver(torax_pydantic.ConfigBase, abc.ABC):
   """Base class for solver configs.
 
   Attributes:

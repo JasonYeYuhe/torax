@@ -36,7 +36,7 @@ from torax._src.torax_pydantic import torax_pydantic
 # pylint: disable=invalid-name
 
 
-class BaseFormation(torax_pydantic.BaseModelFrozen, abc.ABC):
+class BaseFormation(torax_pydantic.ConfigBase, abc.ABC):
   """Base configuration for pedestal formation models.
 
   Attributes:
@@ -187,7 +187,7 @@ class DelabieScalingFormation(PowerScalingFormation):
     )
 
 
-class ProfileValueSaturation(torax_pydantic.BaseModelFrozen):
+class ProfileValueSaturation(torax_pydantic.ConfigBase):
   """Configuration for ProfileValueSaturation model.
 
   This saturation model triggers an increase in pedestal transport when the
@@ -288,7 +288,7 @@ FormationConfig: TypeAlias = Annotated[
 SaturationConfig: TypeAlias = ProfileValueSaturation
 
 
-class BaseStructure(torax_pydantic.BaseModelFrozen, abc.ABC):
+class BaseStructure(torax_pydantic.ConfigBase, abc.ABC):
   """Base configuration for pedestal structure models.
 
   Attributes:
@@ -439,7 +439,7 @@ StructureConfig = Annotated[
 ]
 
 
-class Pedestal(torax_pydantic.BaseModelFrozen):
+class Pedestal(torax_pydantic.ConfigBase):
   """Configuration for the pedestal model.
 
   Attributes:
