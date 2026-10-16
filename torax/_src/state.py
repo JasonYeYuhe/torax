@@ -97,12 +97,7 @@ class CoreProfiles:
       v_loop_lcfs: Loop voltage at LCFS (V).
       Z_i: Main ion charge on cell grid [dimensionless].
       Z_i_face: Main ion charge on face grid [dimensionless].
-      A_i: Main ion mass [amu]. # TODO(b/434175938): Remove in V2. Duplication
-        with new charge_state_info.
-      Z_impurity: Impurity charge of bundled impurity on cell grid
-        [dimensionless].
-      Z_impurity_face: Impurity charge of bundled impurity on face grid
-        [dimensionless].
+      A_i: Main ion mass [amu].
       Z_eff: Effective charge on cell grid [dimensionless].
       Z_eff_face: Effective charge on face grid [dimensionless].
       A_impurity: Impurity mass on cell grid [amu].
@@ -142,8 +137,6 @@ class CoreProfiles:
   Z_i: array_typing.FloatVectorCell
   Z_i_face: array_typing.FloatVectorFace
   A_i: array_typing.FloatScalar
-  Z_impurity: array_typing.FloatVectorCell
-  Z_impurity_face: array_typing.FloatVectorFace
   A_impurity: array_typing.FloatVectorCell
   A_impurity_face: array_typing.FloatVectorFace
   Z_eff: array_typing.FloatVectorCell
@@ -159,6 +152,16 @@ class CoreProfiles:
   charge_state_info_face: charge_states.ChargeStateInfo
   fast_ions: tuple[fast_ion_lib.FastIon, ...]
   internal_plasma_energy: PlasmaInternalEnergy | None = None
+
+  @property
+  def Z_impurity(self) -> array_typing.FloatVectorCell:
+    """Impurity charge of bundled impurity on cell grid [dimensionless]."""
+    return self.charge_state_info.Z_mixture
+
+  @property
+  def Z_impurity_face(self) -> array_typing.FloatVectorFace:
+    """Impurity charge of bundled impurity on face grid [dimensionless]."""
+    return self.charge_state_info_face.Z_mixture
 
   @functools.cached_property
   def impurity_density_scaling(self) -> array_typing.FloatVectorCell:
@@ -382,13 +385,13 @@ class CoreProfiles:
     )
 
   @jax.jit
-  def below_minimum_temperature(self, T_minimum_eV: float) -> jax.Array:
+  def below_minimum_temperature(self, T_min_eV: float) -> jax.Array:
     """Return True if T_e or T_i is below the minimum temperature threshold."""
     # Convert eV -> keV since internal storage is keV
-    T_minimum_keV = T_minimum_eV / 1000.0
+    T_min_keV = T_min_eV / 1000.0
 
-    is_low_te = jnp.any(self.T_e.value < T_minimum_keV)
-    is_low_ti = jnp.any(self.T_i.value < T_minimum_keV)
+    is_low_te = jnp.any(self.T_e.value < T_min_keV)
+    is_low_ti = jnp.any(self.T_i.value < T_min_keV)
 
     return is_low_te | is_low_ti
 

@@ -49,12 +49,12 @@ from torax._src.time_step_calculator import time_step_calculator as ts
 def _has_any_step_error(
     output_state: sim_state.SimState,
     post_processed_outputs: post_processing.PostProcessedOutputs,
-    T_minimum_eV: float,
+    T_min_eV: float,
     adaptive_dt: bool,
 ) -> jax.Array:
   """Single fused XLA check returning True if any error condition is met."""
   return (
-      output_state.core_profiles.below_minimum_temperature(T_minimum_eV)
+      output_state.core_profiles.below_minimum_temperature(T_min_eV)
       | output_state.core_profiles.negative_temperature_or_density()
       | output_state.has_nan()
       | ~output_state.core_profiles.quasineutrality_satisfied()
@@ -168,7 +168,7 @@ class SimulationStepFn:
         _has_any_step_error(
             output_state,
             post_processed_outputs,
-            self._runtime_params_provider.numerics.T_minimum_eV,
+            self._runtime_params_provider.numerics.T_min_eV,
             bool(self._runtime_params_provider.numerics.adaptive_dt),
         )
     ):
@@ -176,7 +176,7 @@ class SimulationStepFn:
 
     # Low-temperature collapse check
     if output_state.core_profiles.below_minimum_temperature(
-        self._runtime_params_provider.numerics.T_minimum_eV
+        self._runtime_params_provider.numerics.T_min_eV
     ):
       return state.SimError.LOW_TEMPERATURE_COLLAPSE
 
@@ -207,7 +207,7 @@ class SimulationStepFn:
       runtime_params_overrides: (
           build_runtime_params.RuntimeParamsProvider | None
       ) = None,
-      geo_overrides: geometry_provider_lib.GeometryProvider | None = None,
+      geometry_overrides: geometry_provider_lib.GeometryProvider | None = None,
   ) -> tuple[
       sim_state.SimState,
       post_processing.PostProcessedOutputs,
@@ -230,7 +230,7 @@ class SimulationStepFn:
         values set in the numerics config.
       runtime_params_overrides: Runtime parameters to override the ones set in
         the runtime params provider.
-      geo_overrides: Geometry provider to override the one set in the step
+      geometry_overrides: Geometry provider to override the one set in the step
         function's geometry provider.
 
     Returns:
@@ -252,7 +252,7 @@ class SimulationStepFn:
     runtime_params_provider = (
         runtime_params_overrides or self.runtime_params_provider
     )
-    geometry_provider = geo_overrides or self._geometry_provider
+    geometry_provider = geometry_overrides or self._geometry_provider
     (
         runtime_params_t,
         geo_t,
@@ -328,7 +328,7 @@ class SimulationStepFn:
       runtime_params_overrides: (
           build_runtime_params.RuntimeParamsProvider | None
       ) = None,
-      geo_overrides: geometry_provider_lib.GeometryProvider | None = None,
+      geometry_overrides: geometry_provider_lib.GeometryProvider | None = None,
   ) -> tuple[
       sim_state.SimState,
       post_processing.PostProcessedOutputs,
@@ -358,7 +358,7 @@ class SimulationStepFn:
           prev_post_processed,
           max_dt=remaining_dt,
           runtime_params_overrides=runtime_params_overrides,
-          geo_overrides=geo_overrides,
+          geometry_overrides=geometry_overrides,
       )
       remaining_dt -= output_state.dt
       return remaining_dt, output_state, post_processed_outputs
@@ -390,7 +390,7 @@ class SimulationStepFn:
       runtime_params_overrides: (
           build_runtime_params.RuntimeParamsProvider | None
       ) = None,
-      geo_overrides: geometry_provider_lib.GeometryProvider | None = None,
+      geometry_overrides: geometry_provider_lib.GeometryProvider | None = None,
   ) -> tuple[
       sim_state.SimState,
       post_processing.PostProcessedOutputs,
@@ -401,7 +401,7 @@ class SimulationStepFn:
         input_state,
         previous_post_processed_outputs,
         runtime_params_overrides,
-        geo_overrides,
+        geometry_overrides,
     )
 
   def _sawtooth_step(
