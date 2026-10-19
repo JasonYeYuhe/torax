@@ -21,12 +21,14 @@ import numpy as np
 from torax._src import state
 from torax._src.geometry import circular_geometry
 from torax._src.pedestal_model import pedestal_model_output as pedestal_model_output_lib
+from torax._src.pedestal_model import pedestal_state as pedestal_state_lib
 from torax._src.pedestal_model import pedestal_transition_state as pedestal_transition_state_lib
 from torax._src.pedestal_model import runtime_params as pedestal_runtime_params_lib
 from torax._src.transport_model import pereverzev as pereverzev_lib
 from torax._src.transport_model import transport_coefficients_builder
 from torax._src.transport_model import transport_coeffs as transport_coeffs_lib
 from torax._src.transport_model import transport_model as transport_model_lib
+from torax._src.transport_model import transport_state as transport_state_lib
 
 
 class TransportCoefficientsBuilderTest(absltest.TestCase):
@@ -51,10 +53,14 @@ class TransportCoefficientsBuilderTest(absltest.TestCase):
         core_components={'mock': self.turbulent_total},
         pedestal_components={},
     )
+    self.transport_state = transport_state_lib.TransportState()
     self.transport_model = mock.create_autospec(
         transport_model_lib.TransportModel, instance=True
     )
-    self.transport_model.return_value = self.turbulent_transport
+    self.transport_model.return_value = (
+        self.turbulent_transport,
+        self.transport_state,
+    )
 
     # Dummy neoclassical transport output.
     self.neoclassical_transport = transport_coeffs_lib.NeoclassicalTransport(
@@ -95,20 +101,25 @@ class TransportCoefficientsBuilderTest(absltest.TestCase):
     )
 
   def test_combines_turbulent_and_neoclassical_without_pereverzev(self):
-    result = transport_coefficients_builder.calculate_all_transport_coeffs(
-        transport_model=self.transport_model,
-        neoclassical_transport=self.neoclassical_transport,
-        two_point_mask=self.mock_two_point_mask,
-        runtime_params=self.runtime_params,
-        geo=self.geo,
-        core_profiles=self.core_profiles,
-        pedestal_transition_state=self.pedestal_state,
-        use_pereverzev=False,
+    result, new_state = (
+        transport_coefficients_builder.calculate_all_transport_coeffs(
+            transport_model=self.transport_model,
+            transport_state=self.transport_state,
+            neoclassical_transport=self.neoclassical_transport,
+            two_point_mask=self.mock_two_point_mask,
+            runtime_params=self.runtime_params,
+            geo=self.geo,
+            core_profiles=self.core_profiles,
+            pedestal_transition_state=self.pedestal_state,
+            pedestal_state=pedestal_state_lib.PedestalState.empty(),
+            use_pereverzev=False,
+        )
     )
 
     self.assertIsNone(result.pereverzev)
     self.assertEqual(result.turbulent, self.turbulent_transport)
     self.assertEqual(result.neoclassical, self.neoclassical_transport)
+    self.assertEqual(new_state, self.transport_state)
     expected_total = transport_coeffs_lib.sum_transport_coeffs(
         self.turbulent_total, self.neoclassical_transport
     )
@@ -127,14 +138,16 @@ class TransportCoefficientsBuilderTest(absltest.TestCase):
         'calculate_pereverzev_transport',
         return_value=self.pereverzev_transport,
     ) as mock_calc_pereverzev:
-      result = transport_coefficients_builder.calculate_all_transport_coeffs(
+      result, _ = transport_coefficients_builder.calculate_all_transport_coeffs(
           transport_model=self.transport_model,
+          transport_state=self.transport_state,
           neoclassical_transport=self.neoclassical_transport,
           two_point_mask=self.mock_two_point_mask,
           runtime_params=self.runtime_params,
           geo=self.geo,
           core_profiles=self.core_profiles,
           pedestal_transition_state=self.pedestal_state,
+          pedestal_state=pedestal_state_lib.PedestalState.empty(),
           use_pereverzev=True,
       )
 
@@ -168,14 +181,16 @@ class TransportCoefficientsBuilderTest(absltest.TestCase):
         'calculate_pereverzev_transport',
         return_value=self.pereverzev_transport,
     ):
-      result = transport_coefficients_builder.calculate_all_transport_coeffs(
+      result, _ = transport_coefficients_builder.calculate_all_transport_coeffs(
           transport_model=self.transport_model,
+          transport_state=self.transport_state,
           neoclassical_transport=self.neoclassical_transport,
           two_point_mask=self.mock_two_point_mask,
           runtime_params=self.runtime_params,
           geo=self.geo,
           core_profiles=self.core_profiles,
           pedestal_transition_state=self.pedestal_state,
+          pedestal_state=pedestal_state_lib.PedestalState.empty(),
           use_pereverzev=True,
       )
 
@@ -206,14 +221,16 @@ class TransportCoefficientsBuilderTest(absltest.TestCase):
         'calculate_pereverzev_transport',
         return_value=self.pereverzev_transport,
     ):
-      result = transport_coefficients_builder.calculate_all_transport_coeffs(
+      result, _ = transport_coefficients_builder.calculate_all_transport_coeffs(
           transport_model=self.transport_model,
+          transport_state=self.transport_state,
           neoclassical_transport=self.neoclassical_transport,
           two_point_mask=self.mock_two_point_mask,
           runtime_params=self.runtime_params,
           geo=self.geo,
           core_profiles=self.core_profiles,
           pedestal_transition_state=self.pedestal_state,
+          pedestal_state=pedestal_state_lib.PedestalState.empty(),
           use_pereverzev=True,
       )
 
@@ -235,14 +252,16 @@ class TransportCoefficientsBuilderTest(absltest.TestCase):
     mock_ped_output.modify_core_transport.return_value = mock_modified_transport
     self.pedestal_state.pedestal_model_output = mock_ped_output
 
-    result = transport_coefficients_builder.calculate_all_transport_coeffs(
+    result, _ = transport_coefficients_builder.calculate_all_transport_coeffs(
         transport_model=self.transport_model,
+        transport_state=self.transport_state,
         neoclassical_transport=self.neoclassical_transport,
         two_point_mask=self.mock_two_point_mask,
         runtime_params=self.runtime_params,
         geo=self.geo,
         core_profiles=self.core_profiles,
         pedestal_transition_state=self.pedestal_state,
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
         use_pereverzev=False,
     )
 
@@ -260,12 +279,14 @@ class TransportCoefficientsBuilderTest(absltest.TestCase):
 
     transport_coefficients_builder.calculate_all_transport_coeffs(
         transport_model=self.transport_model,
+        transport_state=self.transport_state,
         neoclassical_transport=self.neoclassical_transport,
         two_point_mask=self.mock_two_point_mask,
         runtime_params=self.runtime_params,
         geo=self.geo,
         core_profiles=self.core_profiles,
         pedestal_transition_state=self.pedestal_state,
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
         use_pereverzev=False,
     )
 

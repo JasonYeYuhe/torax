@@ -341,6 +341,62 @@ class FormulasTest(parameterized.TestCase):
         alpha_mhd_miller[:-1], alpha_mhd[:-1], rtol=1e-6, atol=1e-12
     )
 
+  def test_calculate_time_derivative_with_exponential_smoothing_positive_dt(
+      self,
+  ):
+    current_value = 12.0
+    previous_value = 10.0
+    previous_smoothed = 2.0
+    dt = 0.5
+    tau = 1.0
+    raw, smoothed = (
+        formulas.calculate_time_derivative_with_exponential_smoothing(
+            current_value=current_value,
+            previous_value=previous_value,
+            previous_smoothed_derivative=previous_smoothed,
+            dt=dt,
+            smoothing_time_scale=tau,
+        )
+    )
+    expected_raw = (current_value - previous_value) / dt
+    alpha = 1.0 - np.exp(-dt / tau)
+    expected_smoothed = (1.0 - alpha) * previous_smoothed + alpha * expected_raw
+    np.testing.assert_allclose(raw, expected_raw)
+    np.testing.assert_allclose(smoothed, expected_smoothed)
+
+  def test_calculate_time_derivative_with_exponential_smoothing_zero_time_scale(
+      self,
+  ):
+    raw, smoothed = (
+        formulas.calculate_time_derivative_with_exponential_smoothing(
+            current_value=15.0,
+            previous_value=5.0,
+            previous_smoothed_derivative=1.0,
+            dt=2.0,
+            smoothing_time_scale=0.0,
+        )
+    )
+    expected_raw = (15.0 - 5.0) / 2.0
+    np.testing.assert_allclose(raw, expected_raw)
+    np.testing.assert_allclose(smoothed, expected_raw)
+
+  def test_calculate_time_derivative_with_exponential_smoothing_non_positive_dt(
+      self,
+  ):
+    prev_smoothed = 3.5
+    for dt in (0.0, -1.0):
+      raw, smoothed = (
+          formulas.calculate_time_derivative_with_exponential_smoothing(
+              current_value=15.0,
+              previous_value=5.0,
+              previous_smoothed_derivative=prev_smoothed,
+              dt=dt,
+              smoothing_time_scale=1.0,
+          )
+      )
+      np.testing.assert_allclose(raw, 0.0)
+      np.testing.assert_allclose(smoothed, prev_smoothed)
+
 
 if __name__ == '__main__':
   absltest.main()

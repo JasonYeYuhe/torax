@@ -21,6 +21,7 @@ a standard linear solution.
 
 
 import jax
+from torax._src import model_state as model_state_lib
 from torax._src import state
 from torax._src.config import runtime_params as runtime_params_lib
 from torax._src.fvm import block_1d_coeffs
@@ -45,12 +46,14 @@ def predictor_corrector_method(
     geo_t_plus_dt: geometry.Geometry,
     x_old: tuple[cell_variable.CellVariable, ...],
     x_new_guess: tuple[cell_variable.CellVariable, ...],
-    core_profiles_t: state.CoreProfiles,
     core_profiles_t_plus_dt: state.CoreProfiles,
     coeffs_exp: block_1d_coeffs.Block1DCoeffs,
     explicit_source_profiles: source_profiles.SourceProfiles,
     coeffs_callback: calc_coeffs.CoeffsCallback,
-    pedestal_transition_state: pedestal_transition_state_lib.PedestalTransitionState,
+    pedestal_transition_state: (
+        pedestal_transition_state_lib.PedestalTransitionState
+    ),
+    model_state: model_state_lib.ModelState,
 ) -> tuple[cell_variable.CellVariable, ...]:
   """Predictor-corrector method.
 
@@ -63,7 +66,6 @@ def predictor_corrector_method(
       time t.
     x_new_guess: Tuple of CellVariables corresponding to the initial guess for
       the next time step.
-    core_profiles_t: Core profiles at the current time step.
     core_profiles_t_plus_dt: Core profiles at the next time step.
     coeffs_exp: Block1DCoeffs PDE coefficients at beginning of timestep.
     explicit_source_profiles: Precomputed explicit source profiles. These
@@ -74,6 +76,7 @@ def predictor_corrector_method(
       to all zeros.
     coeffs_callback: coefficient callback function.
     pedestal_transition_state: State tracking the pedestal transitions.
+    model_state: State of models across timesteps.
 
   Returns:
     x_new: Solution of evolving core profile state variables
@@ -87,11 +90,10 @@ def predictor_corrector_method(
         runtime_params_t_plus_dt,
         geo_t_plus_dt,
         core_profiles_t_plus_dt,
-        prev_core_profiles=core_profiles_t,
-        dt=dt,
         x=x_new_guess,
         explicit_source_profiles=explicit_source_profiles,
         pedestal_transition_state=pedestal_transition_state,
+        model_state=model_state,
         allow_pereverzev=True,
     )
 

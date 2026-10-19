@@ -17,6 +17,7 @@
 import jax
 from jax import numpy as jnp
 from torax._src import jax_utils
+from torax._src import model_state as model_state_lib
 from torax._src import state
 from torax._src.config import runtime_params as runtime_params_lib
 from torax._src.core_profiles import convertors
@@ -49,7 +50,10 @@ class LinearThetaMethod(solver_lib.Solver):
       core_profiles_t_plus_dt: state.CoreProfiles,
       explicit_source_profiles: source_profiles.SourceProfiles,
       evolving_names: tuple[str, ...],
-      pedestal_transition_state: pedestal_transition_state_lib.PedestalTransitionState,
+      pedestal_transition_state: (
+          pedestal_transition_state_lib.PedestalTransitionState
+      ),
+      model_state: model_state_lib.ModelState,
   ) -> tuple[
       tuple[cell_variable.CellVariable, ...],
       state.SolverNumericOutputs,
@@ -74,13 +78,12 @@ class LinearThetaMethod(solver_lib.Solver):
         runtime_params_t,
         geo_t,
         core_profiles_t,
-        prev_core_profiles=None,
-        dt=None,
         x=x_old,
         explicit_source_profiles=explicit_source_profiles,
         allow_pereverzev=True,
         explicit_call=True,
         pedestal_transition_state=pedestal_transition_state,
+        model_state=model_state,
     )
 
     # Calculate x_new with the predictor corrector method. Reverts to a
@@ -93,12 +96,12 @@ class LinearThetaMethod(solver_lib.Solver):
         geo_t_plus_dt=geo_t_plus_dt,
         x_old=x_old,
         x_new_guess=x_new_guess,
-        core_profiles_t=core_profiles_t,
         core_profiles_t_plus_dt=core_profiles_t_plus_dt,
         coeffs_exp=coeffs_exp,
         coeffs_callback=coeffs_callback,
         explicit_source_profiles=explicit_source_profiles,
         pedestal_transition_state=pedestal_transition_state,
+        model_state=model_state,
     )
 
     if runtime_params_t_plus_dt.solver.use_predictor_corrector:

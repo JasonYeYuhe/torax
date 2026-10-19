@@ -28,6 +28,7 @@ from torax._src import static_dataclass
 from torax._src.config import runtime_params as runtime_params_lib
 from torax._src.geometry import geometry
 from torax._src.pedestal_model import pedestal_model_output
+from torax._src.pedestal_model import pedestal_state as pedestal_state_lib
 from torax._src.pedestal_model import pedestal_transition_state as pedestal_transition_state_lib
 from torax._src.pedestal_model import runtime_params as pedestal_runtime_params_lib
 from torax._src.pedestal_model.formation import base as formation_base
@@ -42,15 +43,28 @@ from torax._src.sources import source_profiles as source_profiles_lib
 class PedestalStructureModel(static_dataclass.StaticDataclass, abc.ABC):
   """Calculates temperature, density, and location of the pedestal."""
 
+  def initial_state(
+      self,
+      runtime_params: runtime_params_lib.RuntimeParams,
+      geo: geometry.Geometry,
+      core_profiles: state.CoreProfiles,
+  ) -> pedestal_state_lib.StructureState:
+    """Returns the initial StructureState for this model."""
+    del runtime_params, geo, core_profiles
+    return pedestal_state_lib.StructureState()
+
   @abc.abstractmethod
   def __call__(
       self,
       runtime_params: runtime_params_lib.RuntimeParams,
       geo: geometry.Geometry,
       core_profiles: state.CoreProfiles,
-      pedestal_transition_state: pedestal_transition_state_lib.PedestalTransitionState,
-  ) -> pedestal_model_output.PedestalStructure:
-    """Calculates the pedestal structure properties."""
+      structure_state: pedestal_state_lib.StructureState,
+  ) -> tuple[
+      pedestal_model_output.PedestalStructure,
+      pedestal_state_lib.StructureState,
+  ]:
+    """Calculates the pedestal structure properties and updated state."""
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -67,34 +81,71 @@ class PedestalModel(static_dataclass.StaticDataclass):
       geo: geometry.Geometry,
       core_profiles: state.CoreProfiles,
       source_profiles: source_profiles_lib.SourceProfiles,
-      pedestal_transition_state: pedestal_transition_state_lib.PedestalTransitionState,
-  ) -> pedestal_model_output.PedestalStructure:
-    pedestal_output = self.structure_model(
+      pedestal_transition_state: (
+          pedestal_transition_state_lib.PedestalTransitionState
+      ),
+      pedestal_state: pedestal_state_lib.PedestalState,
+  ) -> tuple[
+      pedestal_model_output.PedestalStructure,
+      pedestal_state_lib.PedestalState,
+  ]:
+    pedestal_output, structure_state = self.structure_model(
         runtime_params,
         geo,
         core_profiles,
-        pedestal_transition_state,
+        pedestal_state.structure,
     )
 
+    formation_state = pedestal_state.formation
     # If in ADAPTIVE_TRANSPORT mode, calculate the transport multipliers based
     # on the formation and saturation models.
     if (
         runtime_params.pedestal.mode
         == pedestal_runtime_params_lib.Mode.ADAPTIVE_TRANSPORT
     ):
-      transport_multipliers = self.compute_transport_multipliers(
-          runtime_params,
-          geo,
-          core_profiles,
-          source_profiles,
-          pedestal_transition_state,
-          pedestal_output,
+      transport_multipliers, formation_state = (
+          self.compute_transport_multipliers(
+              runtime_params,
+              geo,
+              core_profiles,
+              source_profiles,
+              pedestal_transition_state,
+              pedestal_output,
+              pedestal_state,
+          )
       )
       pedestal_output = dataclasses.replace(
           pedestal_output, transport_multipliers=transport_multipliers
       )
 
-    return pedestal_output
+    return (
+        pedestal_output,
+        pedestal_state_lib.PedestalState(
+            structure=structure_state,
+            formation=formation_state,
+            confinement_mode=pedestal_state.confinement_mode,
+            transition_start_time=pedestal_state.transition_start_time,
+            T_i_ped_L_mode=pedestal_state.T_i_ped_L_mode,
+            T_e_ped_L_mode=pedestal_state.T_e_ped_L_mode,
+            n_e_ped_L_mode=pedestal_state.n_e_ped_L_mode,
+        ),
+    )
+
+  def initial_state(
+      self,
+      runtime_params: runtime_params_lib.RuntimeParams,
+      geo: geometry.Geometry,
+      core_profiles: state.CoreProfiles,
+  ) -> pedestal_state_lib.PedestalState:
+    """Returns the initial PedestalState for this model."""
+    return pedestal_state_lib.PedestalState(
+        structure=self.structure_model.initial_state(
+            runtime_params, geo, core_profiles
+        ),
+        formation=self.formation_model.initial_state(
+            runtime_params, geo, core_profiles
+        ),
+    )
 
   def initialize_transition_state(
       self,
@@ -102,35 +153,32 @@ class PedestalModel(static_dataclass.StaticDataclass):
       geo: geometry.Geometry,
       core_profiles: state.CoreProfiles,
       source_profiles: source_profiles_lib.SourceProfiles,
-  ) -> pedestal_transition_state_lib.PedestalTransitionState:
+      pedestal_state: pedestal_state_lib.PedestalState,
+  ) -> tuple[
+      pedestal_transition_state_lib.PedestalTransitionState,
+      pedestal_state_lib.PedestalState,
+  ]:
     """Initializes the pedestal transition state."""
     confinement_mode = self.formation_model.initial_confinement_mode(
-        runtime_params, geo, core_profiles, source_profiles
-    )
-    transition_state = (
-        pedestal_transition_state_lib.PedestalTransitionState.empty(
-            confinement_mode=confinement_mode
-        )
-    )
-    pedestal_output = self.structure_model(
         runtime_params,
         geo,
         core_profiles,
-        transition_state,
+        source_profiles,
+        pedestal_state.formation,
     )
-    # Re-evaluate with previous_pedestal_model_output populated so models that
-    # depend on the previous pedestal width (e.g. EPED-NN) use a consistent
-    # width at t_initial rather than the empty fallback.
-    transition_state = dataclasses.replace(
-        transition_state,
-        previous_pedestal_model_output=pedestal_output,
+    transition_state = (
+        pedestal_transition_state_lib.PedestalTransitionState.empty()
     )
-    pedestal_output = self(
+    pedestal_state = dataclasses.replace(
+        pedestal_state, confinement_mode=confinement_mode
+    )
+    pedestal_output, pedestal_state = self(
         runtime_params,
         geo,
         core_profiles,
         source_profiles,
         transition_state,
+        pedestal_state,
     )
     ped_top_idx = jnp.argmin(
         jnp.abs(geo.rho_norm - pedestal_output.rho_norm_ped_top)
@@ -144,8 +192,8 @@ class PedestalModel(static_dataclass.StaticDataclass):
     # L-mode, use the initial profile values at the pedestal top; when starting
     # in H-mode (where the pedestal top already reflects the H-mode pedestal),
     # fall back to `initial_L_mode_bc_multiplier * face_value()[-1]`.
-    return dataclasses.replace(
-        transition_state,
+    pedestal_state = dataclasses.replace(
+        pedestal_state,
         T_i_ped_L_mode=jnp.where(
             in_l_mode,
             core_profiles.T_i.value[ped_top_idx],
@@ -161,8 +209,13 @@ class PedestalModel(static_dataclass.StaticDataclass):
             core_profiles.n_e.value[ped_top_idx],
             bc_multiplier * core_profiles.n_e.face_value()[-1],
         ),
-        pedestal_model_output=pedestal_output,
-        previous_pedestal_model_output=pedestal_output,
+    )
+    return (
+        dataclasses.replace(
+            transition_state,
+            pedestal_model_output=pedestal_output,
+        ),
+        pedestal_state,
     )
 
   def update_transition_state(
@@ -174,8 +227,9 @@ class PedestalModel(static_dataclass.StaticDataclass):
       pedestal_transition_state: (
           pedestal_transition_state_lib.PedestalTransitionState
       ),
-  ) -> pedestal_transition_state_lib.PedestalTransitionState:
-    """Evaluates transition conditions and updates the transition state.
+      pedestal_state: pedestal_state_lib.PedestalState,
+  ) -> pedestal_state_lib.PedestalState:
+    """Evaluates transition conditions and updates the pedestal state.
 
     Called once per timestep in pre_step. Evaluates the formation model's
     transition conditions, then delegates to the mode-specific update function.
@@ -187,27 +241,34 @@ class PedestalModel(static_dataclass.StaticDataclass):
       source_profiles: Source profiles at time t.
       pedestal_transition_state: Current transition state from previous
         timestep.
+      pedestal_state: Pedestal state carried over from the previous timestep.
 
     Returns:
-      Updated PedestalTransitionState.
+      Updated PedestalState.
     """
-    trigger_l_to_h_transition, trigger_h_to_l_transition = (
-        self.formation_model.evaluate_transition_conditions(
-            runtime_params=runtime_params,
-            geo=geo,
-            core_profiles=core_profiles,
-            source_profiles=source_profiles,
-        )
+    (
+        trigger_l_to_h_transition,
+        trigger_h_to_l_transition,
+        formation_state,
+    ) = self.formation_model.evaluate_transition_conditions(
+        runtime_params=runtime_params,
+        geo=geo,
+        core_profiles=core_profiles,
+        source_profiles=source_profiles,
+        formation_state=pedestal_state.formation,
     )
     match runtime_params.pedestal.mode:
       case pedestal_runtime_params_lib.Mode.ADAPTIVE_TRANSPORT:
         return _update_adaptive_transport(
-            pedestal_transition_state,
+            pedestal_state,
+            formation_state,
             trigger_l_to_h_transition,
             trigger_h_to_l_transition,
         )
       case pedestal_runtime_params_lib.Mode.INTERNAL_BOUNDARY_CONDITION:
         return _update_internal_boundary_condition(
+            pedestal_state,
+            formation_state,
             pedestal_transition_state,
             runtime_params,
             geo,
@@ -226,17 +287,25 @@ class PedestalModel(static_dataclass.StaticDataclass):
       geo: geometry.Geometry,
       core_profiles: state.CoreProfiles,
       source_profiles: source_profiles_lib.SourceProfiles,
-      pedestal_transition_state: pedestal_transition_state_lib.PedestalTransitionState,
+      pedestal_transition_state: (
+          pedestal_transition_state_lib.PedestalTransitionState
+      ),
       pedestal_output: pedestal_model_output.PedestalStructure,
-  ) -> pedestal_model_output.TransportMultipliers:
+      pedestal_state: pedestal_state_lib.PedestalState,
+  ) -> tuple[
+      pedestal_model_output.TransportMultipliers,
+      pedestal_state_lib.FormationState,
+  ]:
     """Computes transport multipliers from formation and saturation models."""
 
-    transport_decrease = self.formation_model(
-        runtime_params,
-        geo,
-        core_profiles,
-        source_profiles,
-        pedestal_transition_state,
+    transport_decrease, updated_formation_state = self.formation_model(
+        runtime_params=runtime_params,
+        geo=geo,
+        core_profiles=core_profiles,
+        source_profiles=source_profiles,
+        pedestal_transition_state=pedestal_transition_state,
+        formation_state=pedestal_state.formation,
+        confinement_mode=pedestal_state.confinement_mode,
     )
     transport_increase = self.saturation_model(
         runtime_params, geo, core_profiles, pedestal_output
@@ -244,21 +313,21 @@ class PedestalModel(static_dataclass.StaticDataclass):
 
     # Combine via exp(log) for numerical stability, as multipliers can
     # be very small or large.
-    return jax.tree.map(
+    multipliers = jax.tree.map(
         lambda x, y: jnp.exp(jnp.log(x) + jnp.log(y)),
         transport_decrease,
         transport_increase,
     )
+    return multipliers, updated_formation_state
 
 
 def _update_adaptive_transport(
-    pedestal_transition_state: (
-        pedestal_transition_state_lib.PedestalTransitionState
-    ),
+    pedestal_state: pedestal_state_lib.PedestalState,
+    formation_state: pedestal_state_lib.FormationState,
     trigger_l_to_h_transition: array_typing.BoolScalar,
     trigger_h_to_l_transition: array_typing.BoolScalar,
-) -> pedestal_transition_state_lib.PedestalTransitionState:
-  """Updates pedestal transition state for ADAPTIVE_TRANSPORT mode.
+) -> pedestal_state_lib.PedestalState:
+  """Updates pedestal state for ADAPTIVE_TRANSPORT mode.
 
   Simple L-mode <-> H-mode transitions with hysteresis. The sigmoid in the
   formation model handles the dynamics of the transition.
@@ -267,15 +336,16 @@ def _update_adaptive_transport(
   transition conditions evaluated at time t (the start of the timestep).
 
   Args:
-    pedestal_transition_state: Current transition state from previous timestep.
+    pedestal_state: Current pedestal state from previous timestep.
+    formation_state: Formation state evaluated for the current timestep.
     trigger_l_to_h_transition: Boolean condition to trigger L->H transition.
     trigger_h_to_l_transition: Boolean condition to trigger H->L
       back-transition.
 
   Returns:
-    Updated PedestalTransitionState.
+    Updated PedestalState.
   """
-  old_confinement_mode = pedestal_transition_state.confinement_mode
+  old_confinement_mode = pedestal_state.confinement_mode
   new_confinement_mode = jnp.select(
       [
           # L-H transition.
@@ -298,18 +368,16 @@ def _update_adaptive_transport(
       default=old_confinement_mode,
   )
 
-  return pedestal_transition_state_lib.PedestalTransitionState(
+  return dataclasses.replace(
+      pedestal_state,
+      formation=formation_state,
       confinement_mode=new_confinement_mode,
-      transition_start_time=pedestal_transition_state.transition_start_time,
-      T_i_ped_L_mode=pedestal_transition_state.T_i_ped_L_mode,
-      T_e_ped_L_mode=pedestal_transition_state.T_e_ped_L_mode,
-      n_e_ped_L_mode=pedestal_transition_state.n_e_ped_L_mode,
-      pedestal_model_output=pedestal_transition_state.pedestal_model_output,
-      previous_pedestal_model_output=pedestal_transition_state.previous_pedestal_model_output,
   )
 
 
 def _update_internal_boundary_condition(
+    pedestal_state: pedestal_state_lib.PedestalState,
+    formation_state: pedestal_state_lib.FormationState,
     pedestal_transition_state: (
         pedestal_transition_state_lib.PedestalTransitionState
     ),
@@ -318,8 +386,8 @@ def _update_internal_boundary_condition(
     core_profiles: state.CoreProfiles,
     trigger_l_to_h_transition: array_typing.BoolScalar,
     trigger_h_to_l_transition: array_typing.BoolScalar,
-) -> pedestal_transition_state_lib.PedestalTransitionState:
-  """Updates pedestal transition state for INTERNAL_BOUNDARY_CONDITION mode.
+) -> pedestal_state_lib.PedestalState:
+  """Updates pedestal state for INTERNAL_BOUNDARY_CONDITION mode.
 
   Full 4-state machine with TRANSITIONING_TO_H/L states, transition timers,
   dithering support, and L-mode value capture for ramp interpolation. When
@@ -343,6 +411,8 @@ def _update_internal_boundary_condition(
       transition.
 
   Args:
+    pedestal_state: Current pedestal state from previous timestep.
+    formation_state: Formation state evaluated for the current timestep.
     pedestal_transition_state: Current transition state from previous timestep.
     runtime_params: Runtime parameters at time t.
     geo: Geometry at time t.
@@ -352,13 +422,13 @@ def _update_internal_boundary_condition(
       back-transition.
 
   Returns:
-    Updated PedestalTransitionState.
+    Updated PedestalState.
   """
-  old_confinement_mode = pedestal_transition_state.confinement_mode
+  old_confinement_mode = pedestal_state.confinement_mode
 
   # Has the transition time elapsed? Used for exiting transition states.
   elapsed_transition_time = (
-      runtime_params.t - pedestal_transition_state.transition_start_time
+      runtime_params.t - pedestal_state.transition_start_time
   )
   transition_is_complete = (
       elapsed_transition_time >= runtime_params.pedestal.transition_time_width
@@ -477,7 +547,7 @@ def _update_internal_boundary_condition(
           runtime_params.t,
           jnp.minimum(
               2.0 * runtime_params.t
-              - pedestal_transition_state.transition_start_time
+              - pedestal_state.transition_start_time
               - runtime_params.pedestal.transition_time_width,
               runtime_params.t,
           ),
@@ -485,7 +555,7 @@ def _update_internal_boundary_condition(
       # Otherwise, preserve the current transition start time. This covers
       # both ongoing transitions (where the mode hasn't changed) and
       # non-transition states (H_MODE/L_MODE where start_time is unused).
-      default=pedestal_transition_state.transition_start_time,
+      default=pedestal_state.transition_start_time,
   )
 
   # Update the target values for transitions to L-mode.
@@ -511,25 +581,25 @@ def _update_internal_boundary_condition(
   new_T_i_ped_L_mode = jnp.where(
       update_L_mode_values,
       core_profiles.T_i.value[ped_top_idx],
-      pedestal_transition_state.T_i_ped_L_mode,
+      pedestal_state.T_i_ped_L_mode,
   )
   new_T_e_ped_L_mode = jnp.where(
       update_L_mode_values,
       core_profiles.T_e.value[ped_top_idx],
-      pedestal_transition_state.T_e_ped_L_mode,
+      pedestal_state.T_e_ped_L_mode,
   )
   new_n_e_ped_L_mode = jnp.where(
       update_L_mode_values,
       core_profiles.n_e.value[ped_top_idx],
-      pedestal_transition_state.n_e_ped_L_mode,
+      pedestal_state.n_e_ped_L_mode,
   )
 
-  return pedestal_transition_state_lib.PedestalTransitionState(
+  return dataclasses.replace(
+      pedestal_state,
+      formation=formation_state,
       confinement_mode=new_confinement_mode,
       transition_start_time=new_transition_start_time,
       T_i_ped_L_mode=new_T_i_ped_L_mode,
       T_e_ped_L_mode=new_T_e_ped_L_mode,
       n_e_ped_L_mode=new_n_e_ped_L_mode,
-      pedestal_model_output=pedestal_transition_state.pedestal_model_output,
-      previous_pedestal_model_output=pedestal_transition_state.previous_pedestal_model_output,
   )

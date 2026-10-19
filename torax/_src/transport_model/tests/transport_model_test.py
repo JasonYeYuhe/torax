@@ -25,12 +25,13 @@ from torax._src import jax_utils
 from torax._src import state
 from torax._src.config import build_runtime_params
 from torax._src.config import runtime_params as runtime_params_lib
-from torax._src.core_profiles import initialization
 from torax._src.geometry import geometry
 from torax._src.pedestal_model import pedestal_model_output as pedestal_model_output_lib
+from torax._src.pedestal_model import pedestal_state as pedestal_state_lib
 from torax._src.pedestal_model import pedestal_transition_state as pedestal_transition_state_lib
 from torax._src.pedestal_model import runtime_params as pedestal_runtime_params_lib
 from torax._src.sources import source_profile_builders
+from torax._src.test_utils import core_profile_helpers
 from torax._src.test_utils import default_configs
 from torax._src.torax_pydantic import model_config
 from torax._src.torax_pydantic import torax_pydantic
@@ -41,6 +42,7 @@ from torax._src.transport_model import register_model
 from torax._src.transport_model import runtime_params as transport_runtime_params_lib
 from torax._src.transport_model import transport_coeffs
 from torax._src.transport_model import transport_model
+from torax._src.transport_model import transport_state as transport_state_lib
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -56,7 +58,11 @@ class FixedTransportModel(component.ComponentTransportModel):
       geo: geometry.Geometry,
       core_profiles: state.CoreProfiles,
       two_point_mask: array_typing.BoolVectorFace,
-  ) -> transport_coeffs.TransportCoeffs:
+      component_state: transport_state_lib.ComponentTransportState,
+  ) -> tuple[
+      transport_coeffs.TransportCoeffs,
+      transport_state_lib.ComponentTransportState,
+  ]:
     chi_face_ion = jnp.linspace(
         0.5, 2, geo.rho_face_norm.shape[0], dtype=jax_utils.get_dtype()
     )
@@ -70,11 +76,14 @@ class FixedTransportModel(component.ComponentTransportModel):
         -0.2, -2, geo.rho_face_norm.shape[0], dtype=jax_utils.get_dtype()
     )
 
-    return transport_coeffs.TransportCoeffs(
-        chi_face_ion=chi_face_ion,
-        chi_face_el=chi_face_el,
-        d_face_el=d_face_el,
-        v_face_el=v_face_el,
+    return (
+        transport_coeffs.TransportCoeffs(
+            chi_face_ion=chi_face_ion,
+            chi_face_el=chi_face_el,
+            d_face_el=d_face_el,
+            v_face_el=v_face_el,
+        ),
+        component_state,
     )
 
 
@@ -96,9 +105,6 @@ def setUpModule():
 
 def _make_transition_state(
     rho_norm_ped_top: float = 1.0,
-    confinement_mode: pedestal_runtime_params_lib.ConfinementMode = (
-        pedestal_runtime_params_lib.ConfinementMode.L_MODE
-    ),
 ) -> pedestal_transition_state_lib.PedestalTransitionState:
   output = mock.create_autospec(
       pedestal_model_output_lib.PedestalStructure,
@@ -106,9 +112,7 @@ def _make_transition_state(
       rho_norm_ped_top=rho_norm_ped_top,
   )
   return dataclasses.replace(
-      pedestal_transition_state_lib.PedestalTransitionState.empty(
-          confinement_mode=confinement_mode
-      ),
+      pedestal_transition_state_lib.PedestalTransitionState.empty(),
       pedestal_model_output=output,
   )
 
@@ -135,6 +139,7 @@ def _build_smoothing_matrix_for_n_rho(
       runtime_params,
       geo,
       _make_transition_state(rho_norm_ped_top=1.0),
+      pedestal_state=pedestal_state_lib.PedestalState.empty(),
   )
   return matrix, geo.rho_face_norm
 
@@ -160,36 +165,34 @@ class TransportMaskingTest(parameterized.TestCase):
     torax_config = model_config.ToraxConfig.from_dict(config)
 
     # Build components
-    runtime_params = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )(t=0.0)
-    geo = torax_config.geometry.build_provider(t=0.0)
     source_models = torax_config.sources.build_models()
-    neoclassical_model = torax_config.neoclassical.build_model()
-    core_profiles = initialization.initial_core_profiles(
-        runtime_params,
-        geo,
-        source_models,
-        neoclassical_model,
+    core_profiles, runtime_params, geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
     )
-    source_profiles = source_profile_builders.build_source_profiles(
+    source_states = source_models.initial_state(runtime_params)
+    source_profiles, _ = source_profile_builders.build_source_profiles(
         runtime_params=runtime_params,
         geo=geo,
         core_profiles=core_profiles,
         source_models=source_models,
+        source_states=source_states,
         explicit=True,
     )
     # We need a pedestal model even if unused by the fixed transport
     pedestal_model = torax_config.pedestal.build_pedestal_model()
+    pedestal_state = pedestal_model.initial_state(
+        runtime_params, geo, core_profiles
+    )
     transition_state = (
         pedestal_transition_state_lib.PedestalTransitionState.empty()
     )
-    pedestal_model_outputs = pedestal_model(
+    pedestal_model_outputs, _ = pedestal_model(
         runtime_params,
         geo,
         core_profiles,
         source_profiles,
         pedestal_transition_state=transition_state,
+        pedestal_state=pedestal_state,
     )
     transition_state = dataclasses.replace(
         transition_state, pedestal_model_output=pedestal_model_outputs
@@ -197,12 +200,14 @@ class TransportMaskingTest(parameterized.TestCase):
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
     model = torax_config.transport.build_transport_model()
-    coeffs = model(
+    coeffs, _ = model(
         runtime_params,
         geo,
         core_profiles,
         transition_state,
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     # Verify chi_i is zeroed out
@@ -232,31 +237,20 @@ class TransportMaskingTest(parameterized.TestCase):
     }
     torax_config = model_config.ToraxConfig.from_dict(config)
     model = torax_config.transport.build_transport_model()
-    geo = torax_config.geometry.build_provider(
-        t=torax_config.numerics.t_initial
-    )
-    runtime_params = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )(
-        t=torax_config.numerics.t_initial,
-    )
-    source_models = torax_config.sources.build_models()
-    neoclassical_model = torax_config.neoclassical.build_model()
-    core_profiles = initialization.initial_core_profiles(
-        runtime_params,
-        geo,
-        source_models,
-        neoclassical_model,
+    core_profiles, runtime_params, geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
     )
     transition_state = _make_transition_state(rho_norm_ped_top=1.0)
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs = model(
+    coeffs, _ = model(
         runtime_params,
         geo,
         core_profiles,
         transition_state,
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     # Reference single model run to compare against
@@ -277,12 +271,14 @@ class TransportMaskingTest(parameterized.TestCase):
     single_runtime = build_runtime_params.RuntimeParamsProvider.from_config(
         single_torax
     )(t=0.0)
-    ref_coeffs = single_model(
+    ref_coeffs, _ = single_model(
         single_runtime,
         geo,
         core_profiles,
         transition_state,
         two_point_mask,
+        transport_state=single_model.initial_state(single_runtime),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     # chi_i should be approx equal to single model (1x contribution)
@@ -355,35 +351,33 @@ class TransportMaskingTest(parameterized.TestCase):
         },
     }
     torax_config = model_config.ToraxConfig.from_dict(config)
-    runtime_params = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )(t=0.0)
-    geo = torax_config.geometry.build_provider(t=0.0)
-    # We need a pedestal model even if unused by the fixed transport
     pedestal_model = torax_config.pedestal.build_pedestal_model()
-    # Mock core profiles (not used by FixedTransportModel but needed for API)
-    core_profiles = initialization.initial_core_profiles(
-        runtime_params,
-        geo,
-        torax_config.sources.build_models(),
-        torax_config.neoclassical.build_model(),
+    source_models = torax_config.sources.build_models()
+    core_profiles, runtime_params, geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
     )
-    source_profiles = source_profile_builders.build_source_profiles(
+    source_states = source_models.initial_state(runtime_params)
+    source_profiles, _ = source_profile_builders.build_source_profiles(
         runtime_params=runtime_params,
         geo=geo,
         core_profiles=core_profiles,
-        source_models=torax_config.sources.build_models(),
+        source_models=source_models,
+        source_states=source_states,
         explicit=True,
+    )
+    pedestal_state = pedestal_model.initial_state(
+        runtime_params, geo, core_profiles
     )
     transition_state = (
         pedestal_transition_state_lib.PedestalTransitionState.empty()
     )
-    pedestal_outputs = pedestal_model(
+    pedestal_outputs, _ = pedestal_model(
         runtime_params,
         geo,
         core_profiles,
         source_profiles,
         pedestal_transition_state=transition_state,
+        pedestal_state=pedestal_state,
     )
     transition_state = dataclasses.replace(
         transition_state, pedestal_model_output=pedestal_outputs
@@ -391,12 +385,14 @@ class TransportMaskingTest(parameterized.TestCase):
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
     transport_model_instance = torax_config.transport.build_transport_model()
-    coeffs = transport_model_instance(
+    coeffs, _ = transport_model_instance(
         runtime_params,
         geo,
         core_profiles,
         transition_state,
         two_point_mask,
+        transport_state=transport_model_instance.initial_state(runtime_params),
+        pedestal_state=pedestal_state,
     )
 
     # Find index where rho > 0.8
@@ -446,34 +442,25 @@ class TransportModelTest(parameterized.TestCase):
     }
     torax_config = model_config.ToraxConfig.from_dict(config)
     model = torax_config.transport.build_transport_model()
-    geo = torax_config.geometry.build_provider(
-        t=torax_config.numerics.t_initial
-    )
-    runtime_params = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )(
-        t=torax_config.numerics.t_initial,
-    )
-    source_models = torax_config.sources.build_models()
-    neoclassical_model = torax_config.neoclassical.build_model()
-    core_profiles = initialization.initial_core_profiles(
-        runtime_params,
-        geo,
-        source_models,
-        neoclassical_model,
+    core_profiles, runtime_params, geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
     )
     transition_state = _make_transition_state(
         rho_norm_ped_top=0.91,
-        confinement_mode=pedestal_runtime_params_lib.ConfinementMode.H_MODE,
+    )
+    pedestal_state = pedestal_state_lib.PedestalState(
+        confinement_mode=pedestal_runtime_params_lib.ConfinementMode.H_MODE
     )
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs = model(
+    coeffs, _ = model(
         runtime_params,
         geo,
         core_profiles,
         transition_state,
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state,
     )
     # Target:
     # - 0.1 for rho = [rho_ped_top, rho_max]
@@ -508,34 +495,25 @@ class TransportModelTest(parameterized.TestCase):
     }
     torax_config = model_config.ToraxConfig.from_dict(config)
     model = torax_config.transport.build_transport_model()
-    geo = torax_config.geometry.build_provider(
-        t=torax_config.numerics.t_initial
-    )
-    runtime_params = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )(
-        t=torax_config.numerics.t_initial,
-    )
-    source_models = torax_config.sources.build_models()
-    neoclassical_model = torax_config.neoclassical.build_model()
-    core_profiles = initialization.initial_core_profiles(
-        runtime_params,
-        geo,
-        source_models,
-        neoclassical_model,
+    core_profiles, runtime_params, geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
     )
     transition_state = _make_transition_state(
         rho_norm_ped_top=0.91,
-        confinement_mode=pedestal_runtime_params_lib.ConfinementMode.H_MODE,
+    )
+    pedestal_state = pedestal_state_lib.PedestalState(
+        confinement_mode=pedestal_runtime_params_lib.ConfinementMode.H_MODE
     )
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs = model(
+    coeffs, _ = model(
         runtime_params,
         geo,
         core_profiles,
         transition_state,
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state,
     )
     # Target:
     # - 1.0 for rho > rho_ped_top, set by pedestal chi_min
@@ -565,6 +543,7 @@ class TransportModelTest(parameterized.TestCase):
         runtime_params,
         geo,
         transition_state,
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
     np.testing.assert_allclose(
         matrix, np.eye(len(geo.rho_face_norm)), atol=1e-7
@@ -585,6 +564,7 @@ class TransportModelTest(parameterized.TestCase):
         runtime_params,
         geo,
         transition_state,
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
     row_sums = np.sum(matrix, axis=1)
     np.testing.assert_allclose(row_sums, np.ones_like(row_sums), atol=1e-6)
@@ -610,6 +590,7 @@ class TransportModelTest(parameterized.TestCase):
         runtime_params,
         geo,
         transition_state,
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     outside_mask = (geo.rho_face_norm < 0.3) | (geo.rho_face_norm > 0.7)
@@ -641,13 +622,16 @@ class TransportModelTest(parameterized.TestCase):
     )
     transition_state = _make_transition_state(
         rho_norm_ped_top=0.8,
-        confinement_mode=pedestal_runtime_params_lib.ConfinementMode.H_MODE,
+    )
+    pedestal_state = pedestal_state_lib.PedestalState(
+        confinement_mode=pedestal_runtime_params_lib.ConfinementMode.H_MODE
     )
     matrix = transport_model._build_smoothing_matrix(
         runtime_params.transport,
         runtime_params,
         geo,
         transition_state,
+        pedestal_state=pedestal_state,
     )
 
     pedestal_mask = geo.rho_face_norm >= 0.8
@@ -728,25 +712,19 @@ class TransportModelTest(parameterized.TestCase):
     }
     torax_config = model_config.ToraxConfig.from_dict(config)
     model = torax_config.transport.build_transport_model()
-    geo = torax_config.geometry.build_provider(
-        t=torax_config.numerics.t_initial
-    )
-    runtime_params = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )(t=torax_config.numerics.t_initial)
-    source_models = torax_config.sources.build_models()
-    neoclassical_model = torax_config.neoclassical.build_model()
-    core_profiles = initialization.initial_core_profiles(
-        runtime_params, geo, source_models, neoclassical_model
+    core_profiles, runtime_params, geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
     )
     transition_state = _make_transition_state(rho_norm_ped_top=0.95)
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs = model(
+    coeffs, _ = model(
         runtime_params,
         geo,
         core_profiles,
         transition_state,
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
     self.assertEqual(coeffs.total.chi_face_ion.shape, geo.rho_face_norm.shape)
 
@@ -814,19 +792,23 @@ class TransportModelTest(parameterized.TestCase):
     transition_state = _make_transition_state(rho_norm_ped_top=1.0)
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs_small = model_small(
+    coeffs_small, _ = model_small(
         params_small,
         geo,
         mock.ANY,
         transition_state,
         two_point_mask,
+        transport_state=model_small.initial_state(params_small),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
-    coeffs_large = model_large(
+    coeffs_large, _ = model_large(
         params_large,
         geo,
         mock.ANY,
         transition_state,
         two_point_mask,
+        transport_state=model_large.initial_state(params_large),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     idx_left = np.where(
@@ -908,12 +890,14 @@ class TransportModelTest(parameterized.TestCase):
     )  # No pedestal restriction for this test
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs = model(
+    coeffs, _ = model(
         runtime_params,
         geo,
         mock.ANY,
         transition_state,
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     # Expected: 1.0 for rho <= 0.5, 2.0 for rho > 0.5
@@ -944,12 +928,14 @@ class TransportModelTest(parameterized.TestCase):
     transition_state = _make_transition_state(rho_norm_ped_top=1.0)
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs = model(
+    coeffs, _ = model(
         runtime_params,
         geo,
         mock.ANY,
         transition_state,
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     expected = jnp.where(geo.rho_face_norm <= 0.5, 2.0, 1.0)
@@ -984,12 +970,14 @@ class TransportModelTest(parameterized.TestCase):
     transition_state = _make_transition_state(rho_norm_ped_top=1.0)
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs = model(
+    coeffs, _ = model(
         runtime_params,
         geo,
         mock.ANY,
         transition_state,
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     # chi_i: Overwritten in outer half.
@@ -1015,7 +1003,13 @@ class TransportModelTest(parameterized.TestCase):
         d_face_el=jnp.ones_like(geo.rho_face_norm),
         v_face_el=jnp.ones_like(geo.rho_face_norm),
     )
-    mock_model.return_value = mock_coeffs
+    mock_model.return_value = (
+        mock_coeffs,
+        transport_state_lib.ComponentTransportState(),
+    )
+    mock_model.initial_state.return_value = (
+        transport_state_lib.ComponentTransportState()
+    )
 
     combined_model = transport_model.TransportModel(
         core_transport_models={'mock': mock_model},
@@ -1057,8 +1051,14 @@ class TransportModelTest(parameterized.TestCase):
     core_profiles = mock.Mock()
 
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
-    coeffs = combined_model(
-        runtime_params, geo, core_profiles, transition_state, two_point_mask
+    coeffs, _ = combined_model(
+        runtime_params,
+        geo,
+        core_profiles,
+        transition_state,
+        two_point_mask,
+        transport_state=combined_model.initial_state(runtime_params),
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
 
     self.assertEqual(mock_model.call_count, 1)
@@ -1069,6 +1069,10 @@ class TransportModelTest(parameterized.TestCase):
     self.assertEqual(call_args[0][3], core_profiles)
     np.testing.assert_array_equal(
         call_args[1]['two_point_mask'], two_point_mask
+    )
+    self.assertIsInstance(
+        call_args[1]['component_state'],
+        transport_state_lib.ComponentTransportState,
     )
 
     # Check individual model outputs are preserved.
@@ -1108,15 +1112,18 @@ class TransportModelTest(parameterized.TestCase):
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
     ped_mask = geo.rho_face_norm >= 0.8
 
-    l_mode_coeffs = model(
+    l_mode_coeffs, _ = model(
         runtime_params,
         geo,
         mock.ANY,
         _make_transition_state(
             rho_norm_ped_top=0.8,
-            confinement_mode=pedestal_runtime_params_lib.ConfinementMode.L_MODE,
         ),
         two_point_mask,
+        transport_state=model.initial_state(runtime_params),
+        pedestal_state=pedestal_state_lib.PedestalState(
+            confinement_mode=pedestal_runtime_params_lib.ConfinementMode.L_MODE,
+        ),
     )
     np.testing.assert_allclose(
         l_mode_coeffs.core.chi_face_ion,
@@ -1133,15 +1140,18 @@ class TransportModelTest(parameterized.TestCase):
         pedestal_runtime_params_lib.ConfinementMode.TRANSITIONING_TO_L_MODE,
     ):
       with self.subTest(confinement_mode=active_mode.name):
-        active_coeffs = model(
+        active_coeffs, _ = model(
             runtime_params,
             geo,
             mock.ANY,
             _make_transition_state(
                 rho_norm_ped_top=0.8,
-                confinement_mode=active_mode,
             ),
             two_point_mask,
+            transport_state=model.initial_state(runtime_params),
+            pedestal_state=pedestal_state_lib.PedestalState(
+                confinement_mode=active_mode,
+            ),
         )
         np.testing.assert_allclose(
             active_coeffs.core.chi_face_ion,
@@ -1202,7 +1212,7 @@ class TransportModelTest(parameterized.TestCase):
         d_face_el=jnp.full_like(geo.rho_face_norm, 1.0),
         v_face_el=jnp.full_like(geo.rho_face_norm, -1.0),
     )
-    model_1.return_value = model_1_coeffs
+    model_1.return_value = (model_1_coeffs, mock.Mock())
     params_1 = mock.Mock()
     params_1.disable_chi_i = False
     params_1.disable_chi_e = False
@@ -1225,7 +1235,7 @@ class TransportModelTest(parameterized.TestCase):
         d_face_el=nan_outside_domain,
         v_face_el=jnp.full_like(geo.rho_face_norm, jnp.nan),
     )
-    model_2.return_value = model_2_coeffs
+    model_2.return_value = (model_2_coeffs, mock.Mock())
     params_2 = mock.Mock()
     params_2.disable_chi_i = True
     params_2.disable_chi_e = False
@@ -1246,7 +1256,7 @@ class TransportModelTest(parameterized.TestCase):
         d_face_el=jnp.zeros_like(geo.rho_face_norm),
         v_face_el=jnp.zeros_like(geo.rho_face_norm),
     )
-    model_3.return_value = model_3_coeffs
+    model_3.return_value = (model_3_coeffs, mock.Mock())
     params_3 = mock.Mock()
     params_3.disable_chi_i = False
     params_3.disable_chi_e = True
@@ -1288,13 +1298,18 @@ class TransportModelTest(parameterized.TestCase):
     two_point_mask = np.zeros_like(geo.rho_face_norm, dtype=bool)
     core_profiles = mock.Mock()
 
-    accumulated_coeffs, _ = combined_model._combine(
+    accumulated_coeffs, _, _ = combined_model._combine(
         models=combined_model.core_transport_models,
         params_map=combined_params.core_transport_model_params,
         runtime_params=runtime_params,
         geo=geo,
         core_profiles=core_profiles,
         two_point_mask=two_point_mask,
+        component_states={
+            'model_1': mock.Mock(),
+            'model_2': mock.Mock(),
+            'model_3': mock.Mock(),
+        },
     )
 
     # Verify no NaNs in any accumulated channel.

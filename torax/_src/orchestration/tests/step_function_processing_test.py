@@ -68,7 +68,7 @@ class StepFunctionProcessingTest(parameterized.TestCase):
         initial_state.get_initial_state_and_post_processed_outputs(step_fn)
     )
     self.assertEqual(
-        sim_state.pedestal_transition_state.confinement_mode,
+        sim_state.model_state.pedestal.confinement_mode,
         ConfinementMode.L_MODE,
     )
 
@@ -76,7 +76,7 @@ class StepFunctionProcessingTest(parameterized.TestCase):
     # (where pedestal_active is False), so the step remains in L_MODE.
     sim_state_1, post_processed_1 = step_fn(sim_state, post_processed)
     self.assertEqual(
-        sim_state_1.pedestal_transition_state.confinement_mode,
+        sim_state_1.model_state.pedestal.confinement_mode,
         ConfinementMode.L_MODE,
     )
 
@@ -84,7 +84,7 @@ class StepFunctionProcessingTest(parameterized.TestCase):
     # (where pedestal_active is True), transitioning to H_MODE.
     sim_state_2, _ = step_fn(sim_state_1, post_processed_1)
     self.assertEqual(
-        sim_state_2.pedestal_transition_state.confinement_mode,
+        sim_state_2.model_state.pedestal.confinement_mode,
         ConfinementMode.H_MODE,
     )
 
@@ -106,38 +106,46 @@ class StepFunctionProcessingTest(parameterized.TestCase):
     )
 
     with self.subTest('initial_L_mode'):
+      init_ps = sim_state.model_state.pedestal
       init_ts = sim_state.pedestal_transition_state
-      self.assertEqual(init_ts.confinement_mode, ConfinementMode.L_MODE)
+      self.assertEqual(init_ps.confinement_mode, ConfinementMode.L_MODE)
       np.testing.assert_allclose(
           init_ts.pedestal_model_output.transport_multipliers.chi_i_multiplier,
           1.0,
       )
 
     with self.subTest('L_to_H_transition'):
-      _, _, _, _, state_h = step_function_processing.pre_step(
+      _, _, _, _, ts_h, model_state_h = step_function_processing.pre_step(
           input_state=dataclasses.replace(sim_state, t=jnp.array(1.5)),
           runtime_params_provider=step_fn.runtime_params_provider,
           geometry_provider=step_fn.geometry_provider,
           models=step_fn._solver.models,
       )
-      self.assertEqual(state_h.confinement_mode, ConfinementMode.H_MODE)
+      self.assertEqual(
+          model_state_h.pedestal.confinement_mode, ConfinementMode.H_MODE
+      )
       np.testing.assert_allclose(
-          state_h.pedestal_model_output.transport_multipliers.chi_i_multiplier,
+          ts_h.pedestal_model_output.transport_multipliers.chi_i_multiplier,
           1e-5,
       )
 
     with self.subTest('H_to_L_transition'):
-      _, _, _, _, state_l = step_function_processing.pre_step(
+      _, _, _, _, ts_l, model_state_l = step_function_processing.pre_step(
           input_state=dataclasses.replace(
-              sim_state, t=jnp.array(2.5), pedestal_transition_state=state_h
+              sim_state,
+              t=jnp.array(2.5),
+              pedestal_transition_state=ts_h,
+              model_state=model_state_h,
           ),
           runtime_params_provider=step_fn.runtime_params_provider,
           geometry_provider=step_fn.geometry_provider,
           models=step_fn._solver.models,
       )
-      self.assertEqual(state_l.confinement_mode, ConfinementMode.L_MODE)
+      self.assertEqual(
+          model_state_l.pedestal.confinement_mode, ConfinementMode.L_MODE
+      )
       np.testing.assert_allclose(
-          state_l.pedestal_model_output.transport_multipliers.chi_i_multiplier,
+          ts_l.pedestal_model_output.transport_multipliers.chi_i_multiplier,
           1.0,
       )
 

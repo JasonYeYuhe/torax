@@ -12,18 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""State for tracking pedestal transitions and persisting pedestal outputs."""
+"""State for persisting intra-step pedestal model outputs."""
 
 import dataclasses
 from typing import Self
 import jax
 import jax.numpy as jnp
 from torax._src import array_typing
-from torax._src import jax_utils
 from torax._src import state
 from torax._src.geometry import geometry
 from torax._src.internal_boundary_conditions import internal_boundary_conditions as internal_boundary_conditions_lib
 from torax._src.pedestal_model import pedestal_model_output as pedestal_model_output_lib
+from torax._src.pedestal_model import pedestal_state as pedestal_state_lib
 from torax._src.pedestal_model import runtime_params as runtime_params_lib
 
 # pylint: disable=invalid-name
@@ -32,60 +32,19 @@ from torax._src.pedestal_model import runtime_params as runtime_params_lib
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class PedestalTransitionState:
-  """Tracks pedestal transition state and previous pedestal model output.
-
-  This state is used when the pedestal model uses a formation model for
-  L-H and H-L transitions. It persists across timesteps to track the current
-  confinement mode, enable smooth transitions, and provide the previous
-  pedestal model output to models that need it (e.g. EPED-NN for
-  self-consistent pedestal width calculations).
+  """Contains the intra-step pedestal model output.
 
   Attributes:
-    confinement_mode: The current confinement mode.
-    transition_start_time: The simulation time at which the current transition
-      started. Set to -inf when no transition is active. If dithering occurs,
-      transition_start_time is a pseudo-value such that the dither has the
-      desired duration.
-    T_i_ped_L_mode: Ion temperature at the pedestal top captured at the start of
-      the most recent L-mode to H-mode transition [keV].
-    T_e_ped_L_mode: Electron temperature at the pedestal top captured at the
-      start of the most recent L-mode to H-mode transition [keV].
-    n_e_ped_L_mode: Electron density at the pedestal top captured at the start
-      of the most recent L-mode to H-mode transition [m^-3].
     pedestal_model_output: The current pedestal model output for this timestep.
-    previous_pedestal_model_output: The pedestal model output from the previous
-      completed timestep. Used by some pedestal models (e.g. EPED-NN) to
-      determine pedestal width for input calculations.
   """
 
-  confinement_mode: array_typing.IntScalar
-  transition_start_time: array_typing.FloatScalar
-  T_i_ped_L_mode: array_typing.FloatScalar
-  T_e_ped_L_mode: array_typing.FloatScalar
-  n_e_ped_L_mode: array_typing.FloatScalar
   pedestal_model_output: pedestal_model_output_lib.PedestalStructure
-  previous_pedestal_model_output: pedestal_model_output_lib.PedestalStructure
 
   @classmethod
-  def empty(
-      cls,
-      confinement_mode: array_typing.IntScalar = (
-          runtime_params_lib.ConfinementMode.L_MODE
-      ),
-  ) -> Self:
-    """Returns a transition state with empty pedestal outputs and L-mode baselines."""
+  def empty(cls) -> Self:
+    """Returns a transition state with empty pedestal outputs."""
     return cls(
-        confinement_mode=jnp.asarray(
-            confinement_mode, dtype=jax_utils.get_int_dtype()
-        ),
-        transition_start_time=jnp.array(-jnp.inf, dtype=jax_utils.get_dtype()),
-        T_i_ped_L_mode=jnp.array(0.0, dtype=jax_utils.get_dtype()),
-        T_e_ped_L_mode=jnp.array(0.0, dtype=jax_utils.get_dtype()),
-        n_e_ped_L_mode=jnp.array(0.0, dtype=jax_utils.get_dtype()),
         pedestal_model_output=(
-            pedestal_model_output_lib.PedestalStructure.no_pedestal()
-        ),
-        previous_pedestal_model_output=(
             pedestal_model_output_lib.PedestalStructure.no_pedestal()
         ),
     )
@@ -94,6 +53,7 @@ class PedestalTransitionState:
       self,
       t: array_typing.FloatScalar,
       transition_time_width: array_typing.FloatScalar,
+      pedestal_state: pedestal_state_lib.PedestalState,
   ) -> array_typing.FloatScalar:
     """Computes the ramp fraction for a pedestal transition.
 
@@ -103,11 +63,12 @@ class PedestalTransitionState:
     Args:
       t: Current simulation time (i.e. t + dt when called from the solver).
       transition_time_width: Duration of the transition ramp.
+      pedestal_state: Pedestal state carried over from the previous timestep.
 
     Returns:
       Ramp fraction clipped to [0, 1].
     """
-    elapsed = t - self.transition_start_time
+    elapsed = t - pedestal_state.transition_start_time
     safe_width = jnp.where(
         transition_time_width == 0.0, 1.0, transition_time_width
     )
@@ -121,6 +82,7 @@ class PedestalTransitionState:
   def _apply_transition_ramp_scaling(
       self,
       ramp_fraction: array_typing.FloatScalar,
+      pedestal_state: pedestal_state_lib.PedestalState,
   ) -> pedestal_model_output_lib.PedestalStructure:
     """Applies ramp scaling to pedestal model output during transitions.
 
@@ -128,22 +90,22 @@ class PedestalTransitionState:
     targets. During an H-L transition, ramps from the H-mode targets back to
     the L-mode values.
 
-    The L-mode values are stored in the pedestal_transition_state (captured
-    at the start of an L->H transition). The H-mode targets are the full
-    pedestal model output.
+    The L-mode values are stored in pedestal_state (captured at the start of an
+    L->H transition). The H-mode targets are the full pedestal model output.
 
     Args:
       ramp_fraction: Progress of the current transition, in [0, 1].
+      pedestal_state: Pedestal state carried over from the previous timestep.
 
     Returns:
       Scaled pedestal model output.
     """
 
     def _interpolate_transition(l_val, h_val):
-      """Interpolates between L-mode and H-mode values based on confinement mode."""
+      """Interpolates between L-mode and H-mode values based on mode."""
       l_to_h_ramp = l_val + ramp_fraction * (h_val - l_val)
       h_to_l_ramp = h_val + ramp_fraction * (l_val - h_val)
-      confinement_mode = self.confinement_mode
+      confinement_mode = pedestal_state.confinement_mode
       return jnp.select(
           [
               confinement_mode == runtime_params_lib.ConfinementMode.L_MODE,
@@ -159,15 +121,15 @@ class PedestalTransitionState:
     pedestal_model_output = self.pedestal_model_output
 
     scaled_T_i = _interpolate_transition(
-        l_val=self.T_i_ped_L_mode,
+        l_val=pedestal_state.T_i_ped_L_mode,
         h_val=pedestal_model_output.T_i_ped,
     )
     scaled_T_e = _interpolate_transition(
-        l_val=self.T_e_ped_L_mode,
+        l_val=pedestal_state.T_e_ped_L_mode,
         h_val=pedestal_model_output.T_e_ped,
     )
     scaled_n_e = _interpolate_transition(
-        l_val=self.n_e_ped_L_mode,
+        l_val=pedestal_state.n_e_ped_L_mode,
         h_val=pedestal_model_output.n_e_ped,
     )
 
@@ -182,17 +144,23 @@ class PedestalTransitionState:
       self,
       t: array_typing.FloatScalar,
       transition_time_width: array_typing.FloatScalar,
+      pedestal_state: pedestal_state_lib.PedestalState,
   ) -> pedestal_model_output_lib.PedestalStructure:
-    """Returns the pedestal model output, scaled by the ramp fraction during transitions."""
+    """Returns the pedestal model output, scaled by the ramp fraction."""
     ramp_fraction = self._compute_ramp_fraction(
         t=t,
         transition_time_width=transition_time_width,
+        pedestal_state=pedestal_state,
     )
-    return self._apply_transition_ramp_scaling(ramp_fraction=ramp_fraction)
+    return self._apply_transition_ramp_scaling(
+        ramp_fraction=ramp_fraction,
+        pedestal_state=pedestal_state,
+    )
 
   def is_ibc_active(
       self,
       pedestal_runtime_params: runtime_params_lib.RuntimeParams,
+      pedestal_state: pedestal_state_lib.PedestalState,
   ) -> array_typing.BoolScalar:
     """Returns whether the pedestal IBC is actively controlling the edge."""
     if (
@@ -201,7 +169,10 @@ class PedestalTransitionState:
     ):
       return False
 
-    return self.confinement_mode != runtime_params_lib.ConfinementMode.L_MODE
+    return (
+        pedestal_state.confinement_mode
+        != runtime_params_lib.ConfinementMode.L_MODE
+    )
 
   def to_internal_boundary_conditions(
       self,
@@ -209,6 +180,7 @@ class PedestalTransitionState:
       pedestal_runtime_params: runtime_params_lib.RuntimeParams,
       geo: geometry.Geometry,
       core_profiles: state.CoreProfiles,
+      pedestal_state: pedestal_state_lib.PedestalState,
   ) -> internal_boundary_conditions_lib.InternalBoundaryConditions:
     """Builds the internal boundary conditions produced by the pedestal model."""
     if (
@@ -218,6 +190,7 @@ class PedestalTransitionState:
       pedestal_model_output = self._get_scaled_pedestal_model_output(
           t=t,
           transition_time_width=pedestal_runtime_params.transition_time_width,
+          pedestal_state=pedestal_state,
       )
       return pedestal_model_output.to_internal_boundary_conditions(
           geo,

@@ -20,6 +20,7 @@ from torax._src.config import runtime_params as runtime_params_lib
 from torax._src.geometry import geometry
 from torax._src.internal_boundary_conditions import base_model
 from torax._src.internal_boundary_conditions import internal_boundary_conditions as internal_boundary_conditions_lib
+from torax._src.pedestal_model import pedestal_state as pedestal_state_lib
 from torax._src.pedestal_model import pedestal_transition_state as pedestal_transition_state_lib
 from torax._src.sources import source_profiles as source_profiles_lib
 
@@ -37,6 +38,7 @@ def build_internal_boundary_conditions(
         base_model.InternalBoundaryConditionModel
     ),
     source_profiles: source_profiles_lib.SourceProfiles,
+    pedestal_state: pedestal_state_lib.PedestalState,
 ) -> internal_boundary_conditions_lib.InternalBoundaryConditions:
   """Builds the active internal boundary conditions for this time step.
 
@@ -53,6 +55,7 @@ def build_internal_boundary_conditions(
     internal_boundary_condition_model: Model used to evaluate profile-condition
       internal boundary conditions.
     source_profiles: Core source profiles.
+    pedestal_state: Pedestal state carried over from the previous timestep.
 
   Returns:
     The active InternalBoundaryConditions object.
@@ -63,6 +66,7 @@ def build_internal_boundary_conditions(
           pedestal_runtime_params=runtime_params.pedestal,
           geo=geo,
           core_profiles=core_profiles,
+          pedestal_state=pedestal_state,
       )
   )
 
@@ -74,7 +78,8 @@ def build_internal_boundary_conditions(
   )
 
   is_pedestal_ibc_active = pedestal_transition_state.is_ibc_active(
-      runtime_params.pedestal
+      runtime_params.pedestal,
+      pedestal_state=pedestal_state,
   )
   return jax.tree.map(
       lambda p, u: jax.lax.select(is_pedestal_ibc_active, p, u),

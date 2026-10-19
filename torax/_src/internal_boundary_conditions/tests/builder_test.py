@@ -18,18 +18,18 @@ from unittest import mock
 from absl.testing import absltest
 import jax.numpy as jnp
 from torax._src import state
-from torax._src.config import build_runtime_params
 from torax._src.config import runtime_params as runtime_params_lib
-from torax._src.core_profiles import initialization
 from torax._src.core_profiles import runtime_params as core_profile_runtime_params
 from torax._src.geometry import circular_geometry
 from torax._src.internal_boundary_conditions import base_model
 from torax._src.internal_boundary_conditions import builder
 from torax._src.internal_boundary_conditions import internal_boundary_conditions as ibc_lib
 from torax._src.pedestal_model import pedestal_model_output
+from torax._src.pedestal_model import pedestal_state as pedestal_state_lib
 from torax._src.pedestal_model import pedestal_transition_state
 from torax._src.pedestal_model import runtime_params as pedestal_runtime_params_lib
 from torax._src.sources import source_profiles as source_profiles_lib
+from torax._src.test_utils import core_profile_helpers
 from torax._src.torax_pydantic import model_config
 
 # pylint: disable=invalid-name
@@ -87,7 +87,6 @@ class BuilderTest(absltest.TestCase):
 
   def _make_transition_state(
       self,
-      confinement_mode: pedestal_runtime_params_lib.ConfinementMode,
       T_e_ped: float = 2.0,
   ) -> pedestal_transition_state.PedestalTransitionState:
     output = pedestal_model_output.PedestalStructure(
@@ -97,20 +96,15 @@ class BuilderTest(absltest.TestCase):
         rho_norm_ped_top=0.9,
     )
     return pedestal_transition_state.PedestalTransitionState(
-        transition_start_time=jnp.array(0.0),
-        T_i_ped_L_mode=jnp.array(0.0),
-        T_e_ped_L_mode=jnp.array(0.0),
-        n_e_ped_L_mode=jnp.array(0.0),
-        confinement_mode=confinement_mode,
         pedestal_model_output=output,
-        previous_pedestal_model_output=output,
     )
 
   def test_l_mode_preserves_profile_conditions_ibc(self):
     runtime_params = self._make_runtime_params(
         profile_conditions_ibc=self.profile_conditions_ibc
     )
-    l_mode_state = self._make_transition_state(
+    l_mode_state = self._make_transition_state()
+    pedestal_state = pedestal_state_lib.PedestalState(
         confinement_mode=pedestal_runtime_params_lib.ConfinementMode.L_MODE
     )
     built_ibc_l = builder.build_internal_boundary_conditions(
@@ -120,6 +114,7 @@ class BuilderTest(absltest.TestCase):
         pedestal_transition_state=l_mode_state,
         internal_boundary_condition_model=self.ibc_model,
         source_profiles=self.source_profiles,
+        pedestal_state=pedestal_state,
     )
     # Profile conditions IBC pins cell values in rho_norm <= 0.3 to 10.0 keV.
     self.assertTrue(jnp.any(built_ibc_l.T_e[self.inboard_mask] == 10.0))
@@ -130,9 +125,9 @@ class BuilderTest(absltest.TestCase):
     runtime_params = self._make_runtime_params(
         profile_conditions_ibc=self.profile_conditions_ibc
     )
-    h_mode_state = self._make_transition_state(
-        confinement_mode=pedestal_runtime_params_lib.ConfinementMode.H_MODE,
-        T_e_ped=2.0,
+    h_mode_state = self._make_transition_state(T_e_ped=2.0)
+    pedestal_state = pedestal_state_lib.PedestalState(
+        confinement_mode=pedestal_runtime_params_lib.ConfinementMode.H_MODE
     )
     built_ibc_h = builder.build_internal_boundary_conditions(
         runtime_params=runtime_params,
@@ -141,6 +136,7 @@ class BuilderTest(absltest.TestCase):
         pedestal_transition_state=h_mode_state,
         internal_boundary_condition_model=self.ibc_model,
         source_profiles=self.source_profiles,
+        pedestal_state=pedestal_state,
     )
     # Profile conditions IBC region is turned off (0.0) in H-mode.
     self.assertTrue(jnp.all(built_ibc_h.T_e[self.inboard_mask] == 0.0))
@@ -151,7 +147,8 @@ class BuilderTest(absltest.TestCase):
       self,
   ):
     runtime_params = self._make_runtime_params(profile_conditions_ibc=None)
-    l_mode_state = self._make_transition_state(
+    l_mode_state = self._make_transition_state()
+    pedestal_state = pedestal_state_lib.PedestalState(
         confinement_mode=pedestal_runtime_params_lib.ConfinementMode.L_MODE
     )
     empty_ibc_model = mock.create_autospec(
@@ -167,6 +164,7 @@ class BuilderTest(absltest.TestCase):
         pedestal_transition_state=l_mode_state,
         internal_boundary_condition_model=empty_ibc_model,
         source_profiles=self.source_profiles,
+        pedestal_state=pedestal_state,
     )
     self.assertTrue(jnp.all(built_ibc.T_e == 0.0))
     self.assertTrue(jnp.all(built_ibc.T_i == 0.0))
@@ -191,19 +189,10 @@ class BuilderTest(absltest.TestCase):
             time_step_calculator=dict(),
         )
     )
+    core_profiles, runtime_params, geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
+    )
     models = torax_config.build_models()
-    runtime_params = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )(
-        t=torax_config.numerics.t_initial,
-    )
-    geo = torax_config.geometry.build_provider(torax_config.numerics.t_initial)
-    core_profiles = initialization.initial_core_profiles(
-        runtime_params=runtime_params,
-        geo=geo,
-        source_models=models.source_models,
-        neoclassical_model=models.neoclassical_model,
-    )
     l_mode_state = pedestal_transition_state.PedestalTransitionState.empty()
 
     built_ibc = builder.build_internal_boundary_conditions(
@@ -211,8 +200,11 @@ class BuilderTest(absltest.TestCase):
         geo=geo,
         core_profiles=core_profiles,
         pedestal_transition_state=l_mode_state,
-        internal_boundary_condition_model=models.internal_boundary_condition_model,
+        internal_boundary_condition_model=(
+            models.internal_boundary_condition_model
+        ),
         source_profiles=self.source_profiles,
+        pedestal_state=pedestal_state_lib.PedestalState.empty(),
     )
     inboard_mask = geo.rho_norm <= 0.3
     self.assertTrue(jnp.any(built_ibc.T_e[inboard_mask] == 10.0))
