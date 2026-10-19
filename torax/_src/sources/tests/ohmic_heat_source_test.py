@@ -22,6 +22,7 @@ from torax._src.core_profiles import initialization
 from torax._src.geometry import circular_geometry
 from torax._src.physics import psi_calculations
 from torax._src.sources import ohmic_heat_source
+from torax._src.sources import source_state as source_state_lib
 from torax._src.sources.tests import test_lib
 from torax._src.torax_pydantic import interpolated_param_2d
 from torax._src.torax_pydantic import torax_pydantic
@@ -59,6 +60,7 @@ class OhmicHeatSourceTest(test_lib.SingleProfileSourceTestCase):
           mock.ANY,
           calculated_source_profiles=None,
           conductivity=mock.ANY,
+          source_state=source_state_lib.SourceState(),
       )
 
   def test_raises_error_if_conductivity_is_none(self):
@@ -86,6 +88,7 @@ class OhmicHeatSourceTest(test_lib.SingleProfileSourceTestCase):
           mock.ANY,
           calculated_source_profiles=mock.ANY,
           conductivity=None,
+          source_state=source_state_lib.SourceState(),
       )
 
   @parameterized.parameters(-2.0, 2.0)
@@ -116,12 +119,13 @@ class OhmicHeatSourceTest(test_lib.SingleProfileSourceTestCase):
     conductivity = mock.Mock()
     conductivity.sigma = jnp.full((n_rho,), 1e6)
 
-    (pohm,) = ohmic_heat_source.OhmicHeatSource()._get_model_value(
+    (pohm,), _ = ohmic_heat_source.OhmicHeatSource()._get_model_value(
         runtime_params=runtime_params,
         geo=geo,
         core_profiles=core_profiles,
         calculated_source_profiles=calculated_source_profiles,
         conductivity=conductivity,
+        source_state=source_state_lib.SourceState(),
     )
 
     mock_calculate_psidot.assert_not_called()
@@ -163,12 +167,13 @@ class OhmicHeatSourceTest(test_lib.SingleProfileSourceTestCase):
     conductivity = mock.Mock()
     conductivity.sigma = jnp.full((n_rho,), 1e6)
 
-    (pohm,) = ohmic_heat_source.OhmicHeatSource()._get_model_value(
+    (pohm,), _ = ohmic_heat_source.OhmicHeatSource()._get_model_value(
         runtime_params=runtime_params,
         geo=geo,
         core_profiles=core_profiles,
         calculated_source_profiles=calculated_source_profiles,
         conductivity=conductivity,
+        source_state=source_state_lib.SourceState(),
     )
 
     np.testing.assert_allclose(np.asarray(pohm), 0.0, atol=1e-12)
@@ -211,12 +216,13 @@ class OhmicHeatSourceTest(test_lib.SingleProfileSourceTestCase):
     conductivity = mock.Mock()
     conductivity.sigma = sigma
 
-    (pohm,) = ohmic_heat_source.OhmicHeatSource()._get_model_value(
+    (pohm,), _ = ohmic_heat_source.OhmicHeatSource()._get_model_value(
         runtime_params=runtime_params,
         geo=geo,
         core_profiles=core_profiles,
         calculated_source_profiles=calculated_source_profiles,
         conductivity=conductivity,
+        source_state=source_state_lib.SourceState(),
     )
     psidot = psi_calculations.calculate_psidot_from_psi_sources(
         psi_sources=zero_psi_sources,
