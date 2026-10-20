@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for pedestal_transition_state and PedestalModel.update_transition_state."""
+"""Unit tests for pedestal_transition_state and PedestalModel."""
 
 import dataclasses
 from unittest import mock
@@ -23,13 +23,15 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 from torax._src.config import build_runtime_params
-from torax._src.core_profiles import initialization
 from torax._src.pedestal_model import pedestal_model_output
 from torax._src.pedestal_model import pedestal_transition_state
-from torax._src.pedestal_model import runtime_params as pedestal_runtime_params_lib
+from torax._src.pedestal_model import (
+    runtime_params as pedestal_runtime_params_lib,
+)
 from torax._src.pedestal_model.formation import power_scaling_formation_model
 from torax._src.physics import scaling_laws
 from torax._src.sources import source_profile_builders
+from torax._src.test_utils import core_profile_helpers
 from torax._src.test_utils import default_configs
 from torax._src.torax_pydantic import model_config
 
@@ -62,12 +64,6 @@ def _make_transition_state(
           T_e_ped=4.5,
           n_e_ped=0.62e20,
       ),
-      previous_pedestal_model_output=pedestal_model_output.PedestalStructure(
-          rho_norm_ped_top=jnp.inf,
-          T_i_ped=0.0,
-          T_e_ped=0.0,
-          n_e_ped=0.0,
-      ),
   )
 
 
@@ -82,8 +78,7 @@ class PedestalTransitionStateTest(parameterized.TestCase):
         confinement_mode=(
             pedestal_runtime_params_lib.ConfinementMode.TRANSITIONING_TO_H_MODE
         ),
-        pedestal_model_output=pedestal_model_output.PedestalStructure.no_pedestal(),
-        previous_pedestal_model_output=(
+        pedestal_model_output=(
             pedestal_model_output.PedestalStructure.no_pedestal()
         ),
     )
@@ -118,9 +113,6 @@ class PedestalTransitionStateTest(parameterized.TestCase):
             n_e_ped=h_mode_target,
             rho_norm_ped_top=0.5,
         ),
-        previous_pedestal_model_output=(
-            pedestal_model_output.PedestalStructure.no_pedestal()
-        ),
     )
 
     scaled_pedestal_model_output = (
@@ -151,9 +143,6 @@ class PedestalTransitionStateTest(parameterized.TestCase):
             T_e_ped=h_mode_target,
             n_e_ped=h_mode_target,
             rho_norm_ped_top=0.8,
-        ),
-        previous_pedestal_model_output=(
-            pedestal_model_output.PedestalStructure.no_pedestal()
         ),
     )
 
@@ -210,7 +199,6 @@ class PedestalTransitionStateTest(parameterized.TestCase):
         n_e_ped_L_mode=jnp.array(0.0),
         confinement_mode=confinement_mode,
         pedestal_model_output=output,
-        previous_pedestal_model_output=output,
     )
     pedestal_params = mock.create_autospec(
         pedestal_runtime_params_lib.RuntimeParams,
@@ -251,26 +239,25 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
         }
     }
     torax_config = model_config.ToraxConfig.from_dict(config)
-    provider = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )
     source_models = torax_config.sources.build_models()
-    neoclassical_model = torax_config.neoclassical.build_model()
-    self.geo = torax_config.geometry.build_provider(0.0)
-    self.runtime_params = provider(t=0.0)
     self.pedestal_model = torax_config.pedestal.build_pedestal_model()
-    self.core_profiles = initialization.initial_core_profiles(
-        self.runtime_params,
-        self.geo,
-        source_models,
-        neoclassical_model,
+
+    self.core_profiles, self.runtime_params, self.geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
     )
-    self.source_profiles = source_profile_builders.build_source_profiles(
+    source_states = source_models.initial_state(self.runtime_params)
+    self.source_profiles, _ = source_profile_builders.build_source_profiles(
         runtime_params=self.runtime_params,
         geo=self.geo,
         core_profiles=self.core_profiles,
         source_models=source_models,
+        source_states=source_states,
         explicit=True,
+    )
+    self.pedestal_state = self.pedestal_model.initial_state(
+        self.runtime_params,
+        self.geo,
+        self.core_profiles,
     )
 
   def _call_update(
@@ -290,13 +277,15 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
         'calculate_P_LH',
         return_value=(jnp.array(_P_LH), None),
     ):
-      return self.pedestal_model.update_transition_state(
+      ts, _ = self.pedestal_model.update_transition_state(
           runtime_params=runtime_params,
           geo=self.geo,
           core_profiles=self.core_profiles,
           source_profiles=self.source_profiles,
           pedestal_transition_state=transition_state,
+          pedestal_state=self.pedestal_state,
       )
+      return ts
 
   # ===== Confinement mode transitions =====
 
@@ -520,12 +509,13 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
         'calculate_P_LH',
         return_value=(jnp.array(_P_LH), None),
     ):
-      h_state = self.pedestal_model.update_transition_state(
+      h_state, _ = self.pedestal_model.update_transition_state(
           runtime_params=runtime_params,
           geo=self.geo,
           core_profiles=self.core_profiles,
           source_profiles=self.source_profiles,
           pedestal_transition_state=state,
+          pedestal_state=self.pedestal_state,
       )
     self.assertEqual(h_state.confinement_mode, ConfinementMode.H_MODE)
     ped_top_idx = jnp.argmin(
@@ -547,17 +537,18 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
         'calculate_P_LH',
         return_value=(jnp.array(_P_LH), None),
     ):
-      l_state = self.pedestal_model.update_transition_state(
+      l_state, _ = self.pedestal_model.update_transition_state(
           runtime_params=runtime_params,
           geo=self.geo,
           core_profiles=self.core_profiles,
           source_profiles=self.source_profiles,
           pedestal_transition_state=h_state,
+          pedestal_state=self.pedestal_state,
       )
     self.assertEqual(l_state.confinement_mode, ConfinementMode.L_MODE)
 
-  def test_initialize_transition_state_two_pass_previous_output(self):
-    """Verifies two-pass evaluation for models using previous width."""
+  def test_initialize_transition_state_structure_state(self):
+    """Verifies structure state threading in initialize_transition_state."""
     structure_cls = type(self.pedestal_model.structure_model)
 
     def width_dependent_impl(
@@ -565,21 +556,17 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
         runtime_params,
         geo,
         core_profiles,
-        transition_state,
+        structure_state,
     ):
       del model_self, runtime_params, geo, core_profiles
-      prev_rho = (
-          transition_state.previous_pedestal_model_output.rho_norm_ped_top
-      )
-      # Simulate EPED-NN behavior: first call has prev_rho == inf (uses fallback
-      # width 0.9 -> T_ped=4.0, computes new width 0.85); second call has
-      # prev_rho == 0.85 -> T_ped=6.0.
-      t_ped = jnp.where(jnp.isinf(prev_rho), 4.0, 6.0)
-      return pedestal_model_output.PedestalStructure(
-          rho_norm_ped_top=jnp.array(0.85),
-          T_i_ped=t_ped,
-          T_e_ped=t_ped,
-          n_e_ped=jnp.array(0.7e20),
+      return (
+          pedestal_model_output.PedestalStructure(
+              rho_norm_ped_top=jnp.array(0.85),
+              T_i_ped=6.0,
+              T_e_ped=6.0,
+              n_e_ped=jnp.array(0.7e20),
+          ),
+          structure_state,
       )
 
     with mock.patch.object(
@@ -588,22 +575,18 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
         autospec=True,
         side_effect=width_dependent_impl,
     ):
-      init_ts = self.pedestal_model.initialize_transition_state(
+      init_ts, init_state = self.pedestal_model.initialize_transition_state(
           self.runtime_params,
           self.geo,
           self.core_profiles,
           self.source_profiles,
+          self.pedestal_state,
       )
     np.testing.assert_allclose(
         init_ts.pedestal_model_output.rho_norm_ped_top, 0.85
     )
     np.testing.assert_allclose(init_ts.pedestal_model_output.T_i_ped, 6.0)
-    np.testing.assert_allclose(
-        init_ts.previous_pedestal_model_output.rho_norm_ped_top, 0.85
-    )
-    np.testing.assert_allclose(
-        init_ts.previous_pedestal_model_output.T_i_ped, 6.0
-    )
+    self.assertEqual(init_state, self.pedestal_state)
 
   def test_initialize_transition_state_L_mode_baselines(self):
     """Verifies L-mode baselines when starting in L-mode vs H-mode."""
@@ -617,11 +600,12 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
           'calculate_P_LH',
           return_value=(jnp.array(_P_LH), None),
       ):
-        l_init_ts = self.pedestal_model.initialize_transition_state(
+        l_init_ts, _ = self.pedestal_model.initialize_transition_state(
             self.runtime_params,
             self.geo,
             self.core_profiles,
             self.source_profiles,
+            self.pedestal_state,
         )
       ped_top_idx = jnp.argmin(
           jnp.abs(
@@ -653,11 +637,12 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
           'calculate_P_LH',
           return_value=(jnp.array(_P_LH), None),
       ):
-        h_init_ts = self.pedestal_model.initialize_transition_state(
+        h_init_ts, _ = self.pedestal_model.initialize_transition_state(
             self.runtime_params,
             self.geo,
             self.core_profiles,
             self.source_profiles,
+            self.pedestal_state,
         )
       self.assertEqual(h_init_ts.confinement_mode, ConfinementMode.H_MODE)
       np.testing.assert_allclose(
@@ -690,11 +675,12 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
           'calculate_P_LH',
           return_value=(jnp.array(_P_LH), None),
       ):
-        h_custom_ts = self.pedestal_model.initialize_transition_state(
+        h_custom_ts, _ = self.pedestal_model.initialize_transition_state(
             custom_runtime_params,
             self.geo,
             self.core_profiles,
             self.source_profiles,
+            self.pedestal_state,
         )
       self.assertEqual(h_custom_ts.confinement_mode, ConfinementMode.H_MODE)
       np.testing.assert_allclose(
@@ -766,11 +752,12 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
         'calculate_P_LH',
         return_value=(jnp.array(_P_LH), None),
     ):
-      init_ts = self.pedestal_model.initialize_transition_state(
+      init_ts, _ = self.pedestal_model.initialize_transition_state(
           runtime_params,
           self.geo,
           self.core_profiles,
           self.source_profiles,
+          self.pedestal_state,
       )
     self.assertEqual(init_ts.confinement_mode, expected_init_mode)
     updated_ts = self._call_update(init_ts, P_SOL=P_SOL)
@@ -799,29 +786,56 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
         torax_config
     )
     pedestal_model = torax_config.pedestal.build_pedestal_model()
-    ts = pedestal_model.initialize_transition_state(
-        provider(t=0.0), self.geo, self.core_profiles, self.source_profiles
+    pedestal_state = pedestal_model.initial_state(
+        provider(t=0.0), self.geo, self.core_profiles
+    )
+    ts, pedestal_state = pedestal_model.initialize_transition_state(
+        provider(t=0.0),
+        self.geo,
+        self.core_profiles,
+        self.source_profiles,
+        pedestal_state,
     )
     l_mode_ti = float(ts.T_i_ped_L_mode)
 
-    ts = pedestal_model.update_transition_state(
-        provider(t=0.5), self.geo, self.core_profiles, self.source_profiles, ts
+    ts, pedestal_state = pedestal_model.update_transition_state(
+        provider(t=0.5),
+        self.geo,
+        self.core_profiles,
+        self.source_profiles,
+        ts,
+        pedestal_state,
     )
     self.assertEqual(ts.confinement_mode, ConfinementMode.L_MODE)
 
-    ts = pedestal_model.update_transition_state(
-        provider(t=1.0), self.geo, self.core_profiles, self.source_profiles, ts
+    ts, pedestal_state = pedestal_model.update_transition_state(
+        provider(t=1.0),
+        self.geo,
+        self.core_profiles,
+        self.source_profiles,
+        ts,
+        pedestal_state,
     )
     self.assertEqual(
         ts.confinement_mode, ConfinementMode.TRANSITIONING_TO_H_MODE
     )
 
     params_mid = provider(t=1.5)
-    ts = pedestal_model.update_transition_state(
-        params_mid, self.geo, self.core_profiles, self.source_profiles, ts
+    ts, pedestal_state = pedestal_model.update_transition_state(
+        params_mid,
+        self.geo,
+        self.core_profiles,
+        self.source_profiles,
+        ts,
+        pedestal_state,
     )
-    output_mid = pedestal_model(
-        params_mid, self.geo, self.core_profiles, self.source_profiles, ts
+    output_mid, pedestal_state = pedestal_model(
+        params_mid,
+        self.geo,
+        self.core_profiles,
+        self.source_profiles,
+        ts,
+        pedestal_state,
     )
     ts = dataclasses.replace(ts, pedestal_model_output=output_mid)
     scaled_mid = ts._get_scaled_pedestal_model_output(
@@ -833,12 +847,22 @@ class UpdatePedestalTransitionStateTest(parameterized.TestCase):
 
     for t in (2.0, 2.5):
       params_t = provider(t=t)
-      ts = pedestal_model.update_transition_state(
-          params_t, self.geo, self.core_profiles, self.source_profiles, ts
+      ts, pedestal_state = pedestal_model.update_transition_state(
+          params_t,
+          self.geo,
+          self.core_profiles,
+          self.source_profiles,
+          ts,
+          pedestal_state,
       )
       self.assertEqual(ts.confinement_mode, ConfinementMode.H_MODE)
-      output_t = pedestal_model(
-          params_t, self.geo, self.core_profiles, self.source_profiles, ts
+      output_t, pedestal_state = pedestal_model(
+          params_t,
+          self.geo,
+          self.core_profiles,
+          self.source_profiles,
+          ts,
+          pedestal_state,
       )
       ts = dataclasses.replace(ts, pedestal_model_output=output_t)
       scaled_t = ts._get_scaled_pedestal_model_output(
@@ -912,26 +936,25 @@ class AdaptiveTransportTransitionStateTest(parameterized.TestCase):
         }
     }
     torax_config = model_config.ToraxConfig.from_dict(config)
-    provider = build_runtime_params.RuntimeParamsProvider.from_config(
-        torax_config
-    )
     source_models = torax_config.sources.build_models()
-    neoclassical_model = torax_config.neoclassical.build_model()
-    self.geo = torax_config.geometry.build_provider(0.0)
-    self.runtime_params = provider(t=0.0)
     self.pedestal_model = torax_config.pedestal.build_pedestal_model()
-    self.core_profiles = initialization.initial_core_profiles(
-        self.runtime_params,
-        self.geo,
-        source_models,
-        neoclassical_model,
+
+    self.core_profiles, self.runtime_params, self.geo = (
+        core_profile_helpers.make_initial_inputs(torax_config)
     )
-    self.source_profiles = source_profile_builders.build_source_profiles(
+    source_states = source_models.initial_state(self.runtime_params)
+    self.source_profiles, _ = source_profile_builders.build_source_profiles(
         runtime_params=self.runtime_params,
         geo=self.geo,
         core_profiles=self.core_profiles,
         source_models=source_models,
+        source_states=source_states,
         explicit=True,
+    )
+    self.pedestal_state = self.pedestal_model.initial_state(
+        self.runtime_params,
+        self.geo,
+        self.core_profiles,
     )
 
   def _call_update(
@@ -950,13 +973,15 @@ class AdaptiveTransportTransitionStateTest(parameterized.TestCase):
         'calculate_P_LH',
         return_value=(jnp.array(_P_LH), None),
     ):
-      return self.pedestal_model.update_transition_state(
+      ts, _ = self.pedestal_model.update_transition_state(
           runtime_params=runtime_params,
           geo=self.geo,
           core_profiles=self.core_profiles,
           source_profiles=self.source_profiles,
           pedestal_transition_state=transition_state,
+          pedestal_state=self.pedestal_state,
       )
+      return ts
 
   def test_L_mode_stays_L_mode_below_threshold(self):
     state = _make_transition_state(ConfinementMode.L_MODE)

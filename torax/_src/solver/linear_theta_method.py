@@ -16,17 +16,17 @@
 
 import jax
 from jax import numpy as jnp
+from torax._src import explicit_model_outputs as explicit_model_outputs_lib
 from torax._src import jax_utils
+from torax._src import model_state as model_state_lib
 from torax._src import state
 from torax._src.config import runtime_params as runtime_params_lib
 from torax._src.core_profiles import convertors
 from torax._src.fvm import calc_coeffs
 from torax._src.fvm import cell_variable
 from torax._src.geometry import geometry
-from torax._src.pedestal_model import pedestal_transition_state as pedestal_transition_state_lib
 from torax._src.solver import predictor_corrector_method
 from torax._src.solver import solver as solver_lib
-from torax._src.sources import source_profiles
 
 
 class LinearThetaMethod(solver_lib.Solver):
@@ -47,9 +47,9 @@ class LinearThetaMethod(solver_lib.Solver):
       geo_t_plus_dt: geometry.Geometry,
       core_profiles_t: state.CoreProfiles,
       core_profiles_t_plus_dt: state.CoreProfiles,
-      explicit_source_profiles: source_profiles.SourceProfiles,
+      explicit_model_outputs: explicit_model_outputs_lib.ExplicitModelOutputs,
       evolving_names: tuple[str, ...],
-      pedestal_transition_state: pedestal_transition_state_lib.PedestalTransitionState,
+      model_state: model_state_lib.ModelState,
   ) -> tuple[
       tuple[cell_variable.CellVariable, ...],
       state.SolverNumericOutputs,
@@ -74,13 +74,11 @@ class LinearThetaMethod(solver_lib.Solver):
         runtime_params_t,
         geo_t,
         core_profiles_t,
-        prev_core_profiles=None,
-        dt=None,
         x=x_old,
-        explicit_source_profiles=explicit_source_profiles,
+        explicit_model_outputs=explicit_model_outputs,
         allow_pereverzev=True,
         explicit_call=True,
-        pedestal_transition_state=pedestal_transition_state,
+        model_state=model_state,
     )
 
     # Calculate x_new with the predictor corrector method. Reverts to a
@@ -93,12 +91,11 @@ class LinearThetaMethod(solver_lib.Solver):
         geo_t_plus_dt=geo_t_plus_dt,
         x_old=x_old,
         x_new_guess=x_new_guess,
-        core_profiles_t=core_profiles_t,
         core_profiles_t_plus_dt=core_profiles_t_plus_dt,
         coeffs_exp=coeffs_exp,
         coeffs_callback=coeffs_callback,
-        explicit_source_profiles=explicit_source_profiles,
-        pedestal_transition_state=pedestal_transition_state,
+        explicit_model_outputs=explicit_model_outputs,
+        model_state=model_state,
     )
 
     if runtime_params_t_plus_dt.solver.use_predictor_corrector:

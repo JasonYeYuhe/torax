@@ -20,6 +20,7 @@ from absl.testing import parameterized
 import chex
 import jax.numpy as jnp
 import numpy as np
+from torax._src import explicit_model_outputs as explicit_model_outputs_lib
 from torax._src import state
 from torax._src.config import config_loader
 from torax._src.orchestration import run_simulation
@@ -189,17 +190,21 @@ class StepFunctionTest(parameterized.TestCase):
     runtime_params = step_fn.runtime_params_provider(
         torax_config.numerics.t_initial
     )
+    explicit_model_outputs = explicit_model_outputs_lib.ExplicitModelOutputs(
+        sources=sim_state.core_sources,
+        pedestal=pedestal_transition_state_lib.PedestalTransitionState.empty(),
+    )
     output_state, _ = step_fn._fixed_step(
         max_dt=jnp.array(passed_max_dt),
         runtime_params_t=runtime_params,
         geo_t=sim_state.geometry,
-        explicit_source_profiles=sim_state.core_sources,
+        explicit_model_outputs=explicit_model_outputs,
         edge_outputs=None,
         input_state=sim_state,
         previous_post_processed_outputs=post_processed_outputs,
         runtime_params_provider=step_fn.runtime_params_provider,
         geometry_provider=step_fn.geometry_provider,
-        pedestal_transition_state=pedestal_transition_state_lib.PedestalTransitionState.empty(),
+        model_state_t=sim_state.model_state,
     )
     self.assertGreater(config_dt, passed_max_dt)
     np.testing.assert_allclose(
@@ -223,17 +228,21 @@ class StepFunctionTest(parameterized.TestCase):
     runtime_params = step_fn.runtime_params_provider(
         torax_config.numerics.t_initial
     )
+    explicit_model_outputs = explicit_model_outputs_lib.ExplicitModelOutputs(
+        sources=sim_state.core_sources,
+        pedestal=pedestal_transition_state_lib.PedestalTransitionState.empty(),
+    )
     output_state, _ = step_fn._fixed_step(
         max_dt=jnp.array(passed_max_dt),
         runtime_params_t=runtime_params,
         geo_t=sim_state.geometry,
-        explicit_source_profiles=sim_state.core_sources,
+        explicit_model_outputs=explicit_model_outputs,
         edge_outputs=None,
         input_state=sim_state,
         previous_post_processed_outputs=post_processed_outputs,
         runtime_params_provider=step_fn.runtime_params_provider,
         geometry_provider=step_fn.geometry_provider,
-        pedestal_transition_state=pedestal_transition_state_lib.PedestalTransitionState.empty(),
+        model_state_t=sim_state.model_state,
     )
     self.assertGreater(passed_max_dt, config_dt)
     np.testing.assert_allclose(
@@ -256,17 +265,21 @@ class StepFunctionTest(parameterized.TestCase):
     runtime_params = step_fn.runtime_params_provider(
         torax_config.numerics.t_initial
     )
+    explicit_model_outputs = explicit_model_outputs_lib.ExplicitModelOutputs(
+        sources=sim_state.core_sources,
+        pedestal=pedestal_transition_state_lib.PedestalTransitionState.empty(),
+    )
     output_state, _ = step_fn._adaptive_step(
         max_dt=jnp.array(passed_max_dt),
         runtime_params_t=runtime_params,
         geo_t=sim_state.geometry,
-        explicit_source_profiles=sim_state.core_sources,
+        explicit_model_outputs=explicit_model_outputs,
         edge_outputs=None,
         input_state=sim_state,
         previous_post_processed_outputs=post_processed_outputs,
         runtime_params_provider=step_fn.runtime_params_provider,
         geometry_provider=step_fn.geometry_provider,
-        pedestal_transition_state=pedestal_transition_state_lib.PedestalTransitionState.empty(),
+        model_state_t=sim_state.model_state,
     )
     self.assertTrue(np.less_equal(output_state.dt, passed_max_dt))
 
