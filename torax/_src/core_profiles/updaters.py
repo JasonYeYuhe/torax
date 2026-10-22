@@ -28,12 +28,11 @@ Includes:
   the next timestep and returns updates to State.
 """
 
+from collections.abc import Mapping
 import dataclasses
 
 import jax
-import jax.numpy as jnp
 from torax._src import array_typing
-from torax._src import jax_utils
 from torax._src import state
 from torax._src.config import runtime_params as runtime_params_lib
 from torax._src.core_profiles import convertors
@@ -47,6 +46,7 @@ from torax._src.physics import psi_calculations
 from torax._src.sources import source_models as source_models_lib
 from torax._src.sources import source_profile_builders
 from torax._src.sources import source_profiles as source_profiles_lib
+from torax._src.sources import source_state as source_state_lib
 
 # pylint: disable=invalid-name
 
@@ -140,8 +140,13 @@ def update_core_and_source_profiles_after_step(
     source_models: source_models_lib.SourceModels,
     neoclassical_model: neoclassical_model_lib.NeoclassicalModel,
     evolving_names: tuple[str, ...],
-) -> tuple[state.CoreProfiles, source_profiles_lib.SourceProfiles]:
-  """Returns a core profiles and source profiles after the solver has finished.
+    source_states: Mapping[str, source_state_lib.SourceState],
+) -> tuple[
+    state.CoreProfiles,
+    source_profiles_lib.SourceProfiles,
+    dict[str, source_state_lib.SourceState],
+]:
+  """Updates core profiles, source profiles, and source states after a step.
 
   Updates the evolved variables and derived variables like q_face, psidot, etc.
 
@@ -158,9 +163,10 @@ def update_core_and_source_profiles_after_step(
     source_models: The source models.
     neoclassical_model: The neoclassical model.
     evolving_names: The names of the evolving variables.
+    source_states: Source state carried over from the previous timestep.
 
   Returns:
-    A tuple of the new core profiles and the source profiles.
+    Updated core profiles, source profiles, and source states.
   """
 
   updated_core_profiles_t_plus_dt = convertors.solver_x_tuple_to_core_profiles(
@@ -256,15 +262,18 @@ def update_core_and_source_profiles_after_step(
   )
 
   # build_source_profiles calculates the union with explicit + implicit
-  total_source_profiles = source_profile_builders.build_source_profiles(
-      runtime_params=runtime_params_t_plus_dt,
-      geo=geo,
-      source_models=source_models,
-      core_profiles=intermediate_core_profiles,
-      explicit=False,
-      explicit_source_profiles=explicit_source_profiles,
-      conductivity=neoclassical_outputs.conductivity,
-      bootstrap_current=neoclassical_outputs.bootstrap_current,
+  total_source_profiles, next_source_states = (
+      source_profile_builders.build_source_profiles(
+          runtime_params=runtime_params_t_plus_dt,
+          geo=geo,
+          source_models=source_models,
+          source_states=source_states,
+          core_profiles=intermediate_core_profiles,
+          explicit=False,
+          explicit_source_profiles=explicit_source_profiles,
+          conductivity=neoclassical_outputs.conductivity,
+          bootstrap_current=neoclassical_outputs.bootstrap_current,
+      )
   )
 
   intermediate_core_profiles = dataclasses.replace(
@@ -303,7 +312,11 @@ def update_core_and_source_profiles_after_step(
       intermediate_core_profiles,
       psidot=psidot,
   )
-  return core_profiles_t_plus_dt, total_source_profiles
+  return (
+      core_profiles_t_plus_dt,
+      total_source_profiles,
+      next_source_states,
+  )
 
 
 def provide_core_profiles_t_plus_dt(
@@ -383,24 +396,28 @@ def _update_energy_state(
           geo,
       )
   )
-  dW_i_dt_raw = (W_thermal_i - prev_energy_state.W_thermal_i) / dt
-  dW_e_dt_raw = (W_thermal_e - prev_energy_state.W_thermal_e) / dt
-
-  exponential_smoothing_alpha = jax.lax.cond(
-      runtime_params.numerics.dW_dt_smoothing_time_scale > 0.0,
-      lambda: jnp.array(1.0, dtype=jax_utils.get_dtype())
-      - jnp.exp(-dt / runtime_params.numerics.dW_dt_smoothing_time_scale),
-      lambda: jnp.array(1.0, dtype=jax_utils.get_dtype()),
+  smoothing_time = runtime_params.numerics.dW_dt_smoothing_time_scale
+  dW_i_dt_raw, dW_i_dt_smoothed = (
+      formulas.calculate_time_derivative_with_exponential_smoothing(
+          current_value=W_thermal_i,
+          previous_value=prev_energy_state.W_thermal_i,
+          previous_smoothed_derivative=(
+              prev_energy_state.dW_thermal_i_dt_smoothed
+          ),
+          dt=dt,
+          smoothing_time_scale=smoothing_time,
+      )
   )
-  dW_i_dt_smoothed = _exponential_smoothing(
-      dW_i_dt_raw,
-      prev_energy_state.dW_thermal_i_dt_smoothed,
-      exponential_smoothing_alpha,
-  )
-  dW_e_dt_smoothed = _exponential_smoothing(
-      dW_e_dt_raw,
-      prev_energy_state.dW_thermal_e_dt_smoothed,
-      exponential_smoothing_alpha,
+  dW_e_dt_raw, dW_e_dt_smoothed = (
+      formulas.calculate_time_derivative_with_exponential_smoothing(
+          current_value=W_thermal_e,
+          previous_value=prev_energy_state.W_thermal_e,
+          previous_smoothed_derivative=(
+              prev_energy_state.dW_thermal_e_dt_smoothed
+          ),
+          dt=dt,
+          smoothing_time_scale=smoothing_time,
+      )
   )
 
   return state.PlasmaInternalEnergy(
@@ -412,8 +429,3 @@ def _update_energy_state(
       dW_thermal_i_dt_smoothed=dW_i_dt_smoothed,
       dW_thermal_e_dt_smoothed=dW_e_dt_smoothed,
   )
-
-
-def _exponential_smoothing(new_raw, old_smoothed, alpha):
-  """Exponential moving average (EMA)."""
-  return (1.0 - alpha) * old_smoothed + alpha * new_raw
